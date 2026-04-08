@@ -1,0 +1,22 @@
+{
+  "name": "@rift-finance/mcp-server",
+  "version": "1.0.0",
+  "description": "MCP server for Rift Finance SDK and API documentation - enables AI assistants to query endpoints, types, and usage examples",
+  "main": "dist/index.js",
+  "bin": {
+    "rift-mcp-server": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "npx ts-node src/index.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.1"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.2",
+    "@types/node": "^22.0.0",
+    "ts-node": "^10.9.2"
+  }
+}
