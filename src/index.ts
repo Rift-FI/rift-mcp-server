@@ -90,11 +90,10 @@ Gasless = no gas fees for the user.`,
 Prerequisites: user must be logged in, merchant-approved, KYC verified (for >$20)
 
 1. Ask user: how much to withdraw, which currency (KES, NGN, etc.)
-2. Call rift_preview_exchange_rate with type: "offramp" — show the rate to user
+2. Call rift_preview_exchange_rate with type: "offramp" AND the amount — this returns the rate AND feeBreakdown (fee, feePercentage, userReceivesFiat, totalUsdcNeeded). Show this to user.
 3. Call rift_get_payment_methods with currency to find valid bankCode values
 4. Ask user for recipient details (name, phone/account number)
-5. Call rift_get_withdrawal_fee to show the fee
-6. Confirm everything with user
+5. Confirm everything with user (amount, fee, what they'll receive in fiat)
 7. Call rift_send_otp to send OTP for transaction auth
 8. Ask user for OTP code
 9. Call rift_offramp with all details + otpCode
@@ -393,7 +392,7 @@ server.tool(
 
 server.tool(
   "rift_verify_otp",
-  "Verify an OTP code (standalone verification, not for login). Use rift_login instead if you're trying to authenticate.",
+  "Verify an OTP code WITHOUT logging in. Rarely needed — for login, use rift_login directly (it verifies OTP internally). For transactions/offramp, pass otpCode directly to rift_send_crypto/rift_offramp. Only use this for standalone OTP checks.",
   {
     email: z.string().optional().describe("Email the OTP was sent to"),
     phone: z.string().optional().describe("Phone the OTP was sent to"),
@@ -656,7 +655,7 @@ server.tool(
 
 server.tool(
   "rift_get_balance",
-  "Get wallet balance. Call with no params for ALL balances across ALL chains. Or filter by chain and/or token. Requires login.",
+  "Get wallet balance. Returns crypto balances (USDC, USDT, ETH, etc), NOT fiat amounts. Call with no params for all balances across all chains. To convert to fiat, use rift_preview_exchange_rate after. Requires login.",
   {
     chain: z.string().optional().describe("Filter by chain: BASE, POLYGON, ARBITRUM, ETHEREUM, LISK, BNB, BERACHAIN, CELO"),
     token: z.string().optional().describe("Filter by token: USDC, USDT, ETH, BTC, etc"),
@@ -707,7 +706,7 @@ server.tool(
 
 server.tool(
   "rift_get_transaction_history",
-  "Get transaction history. Requires login.",
+  "Get on-chain transaction history (sends/receives). For offramp order history, use rift_get_offramp_orders. For onramp order history, use rift_get_onramp_orders. Requires login.",
   {
     limit: z.number().optional().describe("Number of transactions (default 10)"),
     page: z.number().optional().describe("Page number"),
@@ -730,7 +729,7 @@ server.tool(
 
 server.tool(
   "rift_get_transaction_fee",
-  "Calculate the fee before sending. Call this to show user the fee before rift_send_crypto. Requires login.",
+  "Calculate the gas/network fee for sending crypto (rift_send_crypto). This is the on-chain transaction fee, NOT the offramp/exchange fee. For offramp fees, use rift_preview_exchange_rate with amount and type='offramp'. Requires login.",
   {
     recipient: z.string().describe("Recipient address"),
     amount: z.string().describe("Amount to send"),
@@ -808,7 +807,7 @@ server.tool(
 
 server.tool(
   "rift_offramp_create_order",
-  "Create an offramp order (alternative to rift_offramp). Same requirements: login + merchant approval + KYC + OTP/password. This creates the order via a different backend path (/offramp/offramp).",
+  "DO NOT USE unless specifically asked. This is an older alternative to rift_offramp that hits a different backend path. Use rift_offramp instead — it does the same thing but with a better interface (separate recipientName/bankCode/accountNumber params instead of a raw JSON string). Same requirements: login + merchant approval + KYC + OTP/password.",
   {
     token: z.string().default("USDC"),
     amount: z.number().describe("Amount in crypto"),
@@ -829,7 +828,7 @@ server.tool(
 
 server.tool(
   "rift_send_payment_link",
-  "Send a payment link to someone via SMS and/or email. Requires login.",
+  "Send an existing payment link URL to someone via SMS and/or email. This does NOT create a payment — it just delivers an existing URL. You need to have a payment link URL already (e.g. from an invoice). At least one of recipientPhone or recipientEmail is required. Requires login.",
   {
     paymentLink: z.string().describe("The payment URL to send"),
     message: z.string().describe("Message to include with the link"),
@@ -846,12 +845,15 @@ server.tool(
 
 server.tool(
   "rift_get_withdrawal_fee",
-  "Get the withdrawal fee for a given USDC amount. Call before rift_offramp to show user the fee. Requires login.",
-  { amount: z.number().describe("USDC amount to withdraw") },
-  async ({ amount }) => {
+  "DO NOT USE THIS to show users their withdrawal fee — it only returns the raw KES buy/sell spread, not the actual fee on a withdrawal. Instead, use rift_preview_exchange_rate with an amount and type='offramp' — that returns feeBreakdown with the real fee, feePercentage, userReceivesFiat, and totalUsdcNeeded. This tool exists only for internal diagnostics.",
+  {},
+  async () => {
     const authErr = requireAuth();
     if (authErr) return ok(authErr);
-    try { return json(await client.request("POST", "/api/v1/offramp/get-withdrawal-fee", { body: { amount } })); }
+    try {
+      const result = await client.request("POST", "/api/v1/offramp/get-withdrawal-fee", { body: { amount: 0 } });
+      return ok(`Raw KES spread: ${JSON.stringify(result, null, 2)}\n\nThis is NOT the user's withdrawal fee. To get the real fee for a specific withdrawal, call rift_preview_exchange_rate with amount and type="offramp" — it returns feeBreakdown.fee, feeBreakdown.feePercentage, feeBreakdown.userReceivesFiat.`);
+    }
     catch (e: any) { return err(e); }
   }
 );
@@ -889,10 +891,10 @@ server.tool(
 
 server.tool(
   "rift_buy_crypto",
-  "Buy crypto with mobile money (M-Pesa, etc). REAL PAYMENT — confirm with user. Requires: login + merchant approval + KYC (for >$20). Does NOT require OTP. User receives a mobile money prompt on their phone. Use rift_preview_exchange_rate with type='onramp' to show rate first.",
+  "Buy crypto with mobile money (M-Pesa, etc). REAL PAYMENT — confirm with user. The 'amount' here is in LOCAL FIAT currency (e.g. 1000 = 1000 KES), NOT in USDC. Use rift_preview_exchange_rate with type='onramp' first to show how much USDC they'll get. Requires: login + merchant approval + KYC (for >$20). Does NOT require OTP. User receives a mobile money prompt on their phone.",
   {
     shortcode: z.string().describe("Payment shortcode e.g. MPESA_KE"),
-    amount: z.number().describe("Amount in LOCAL currency (e.g. 1000 KES)"),
+    amount: z.number().describe("Amount in LOCAL FIAT currency (e.g. 1000 for 1000 KES) — NOT in USDC"),
     chain: z.string().default("BASE").describe("Destination chain for crypto"),
     asset: z.string().default("USDC").describe("Crypto to buy"),
     mobile_network: z.string().describe("Network: Safaricom, Airtel, MTN, etc"),
@@ -1261,7 +1263,7 @@ server.tool(
 
 server.tool(
   "rift_sign_transaction",
-  "Sign a transaction WITHOUT broadcasting it. Returns the signed transaction data. Requires login.",
+  "Sign a raw blockchain transaction WITHOUT broadcasting it (low-level). This is NOT for sending tokens — use rift_send_crypto for that. Returns signed tx data for manual submission. Requires login.",
   {
     chain: z.string().describe("Chain"),
     to: z.string().optional().describe("Contract/recipient address"),
@@ -1280,7 +1282,7 @@ server.tool(
 
 server.tool(
   "rift_send_transaction",
-  "Sign AND broadcast a raw transaction. REAL TX — confirm with user. Requires login.",
+  "Sign AND broadcast a raw blockchain transaction (low-level). This is NOT for sending tokens to someone — use rift_send_crypto for that. This is for advanced use: calling smart contracts, sending ETH, etc. REAL TX — confirm with user. Requires login.",
   {
     chain: z.string().describe("Chain"),
     to: z.string().optional().describe("Contract/recipient address"),
@@ -1318,7 +1320,7 @@ server.tool(
 
 server.tool(
   "rift_get_tokens",
-  "Get all supported tokens, or filter by chain ID. No auth required for public list, login required for user's tokens.",
+  "Get the list of supported token TYPES (metadata: name, contract address, chain). This is NOT balances — use rift_get_balance for balances. No auth required.",
   { chainId: z.string().optional().describe("Chain ID to filter (e.g. '8453' for Base, '137' for Polygon)") },
   async ({ chainId }) => {
     try {
@@ -1330,7 +1332,7 @@ server.tool(
 
 server.tool(
   "rift_get_user_tokens",
-  "Get tokens the logged-in user holds. Requires login.",
+  "Get the list of token TYPES the user has interacted with (metadata, not balances). For actual balances, use rift_get_balance. Requires login.",
   {},
   async () => {
     const authErr = requireAuth();
@@ -1421,12 +1423,24 @@ server.tool(
 
 server.tool(
   "rift_get_deposits",
-  "Get all USDC deposits tracked on Base network. Requires login.",
+  "Get onchain deposit history for the user (queried live from The Graph). Shows inbound transfers to the user's smart wallets with USDC amounts, KES conversion, sender address, tx hash, and timestamp. This is NOT a balance check — use rift_get_balance for current balances. Requires login.",
   {},
   async () => {
     const authErr = requireAuth();
     if (authErr) return ok(authErr);
     try { return json(await client.request("GET", "/api/v1/deposits/")); }
+    catch (e: any) { return err(e); }
+  }
+);
+
+server.tool(
+  "rift_get_deposit_stats",
+  "Get deposit statistics: totalDeposits (count), totalUsdcAmount, totalKesAmount, plus the full deposits list. Summary of all onchain deposits to the user's wallets. Requires login.",
+  {},
+  async () => {
+    const authErr = requireAuth();
+    if (authErr) return ok(authErr);
+    try { return json(await client.request("GET", "/api/v1/deposits/stats")); }
     catch (e: any) { return err(e); }
   }
 );
