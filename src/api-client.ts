@@ -75,6 +75,16 @@ export class RiftApiClient {
     }
 
     const response = await fetch(url.toString(), fetchOpts);
+
+    const contentType = response.headers.get("content-type") || "";
+    if (!contentType.includes("application/json")) {
+      if (!response.ok) {
+        throw new Error(`Server error (HTTP ${response.status}). The API may be temporarily unavailable.`);
+      }
+      const text = await response.text();
+      throw new Error(`Unexpected non-JSON response from API: ${text.slice(0, 200)}`);
+    }
+
     const data: any = await response.json();
 
     if (!response.ok) {
