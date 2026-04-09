@@ -667,7 +667,7 @@ server.tool(
 
 server.tool(
   "rift_get_balance",
-  "Get wallet balance. Returns crypto balances (USDC, USDT, ETH, etc), NOT fiat amounts. Call with no params for all balances across all chains. To convert to fiat, use rift_preview_exchange_rate after. Requires login.",
+  "Get wallet balance. Returns crypto balances (USDC, USDT, ETH, etc), NOT fiat amounts. Call with no params for all balances across all chains. To display in local fiat: call rift_preview_exchange_rate with type='offramp', then multiply USDC balance × buying_rate. Requires login.",
   {
     chain: z.string().optional().describe("Filter by chain: BASE, POLYGON, ARBITRUM, ETHEREUM, LISK, BNB, BERACHAIN, CELO"),
     token: z.string().optional().describe("Filter by token: USDC, USDT, ETH, BTC, etc"),
@@ -762,7 +762,16 @@ server.tool(
 
 server.tool(
   "rift_preview_exchange_rate",
-  "Preview exchange rate for offramp or onramp. IMPORTANT: offramp and onramp rates are DIFFERENT. Always set type to match the operation. The response includes selling_rate (for offramp), buying_rate (for onramp), and fee breakdown. Do NOT use an offramp rate to estimate onramp, or vice versa.",
+  `Preview exchange rate. IMPORTANT: offramp and onramp rates are DIFFERENT — always set type correctly.
+
+Rate fields explained:
+- buying_rate = OFFRAMP/withdrawal rate — fiat per USDC when cashing out. Multiply USDC × buying_rate to get fiat the user receives.
+- selling_rate = ONRAMP/deposit rate — fiat per USDC when buying crypto. User pays this much fiat per USDC.
+
+To show a user's balance in local fiat: USDC balance × buying_rate.
+To show how much USDC they get for fiat: fiat amount / selling_rate.
+
+Pass an amount to get feeBreakdown with exact fee, feePercentage, userReceivesFiat, and totalUsdcNeeded.`,
   {
     currency: z.string().describe("Fiat currency: KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL"),
     amount: z.number().optional().describe("Amount in USDC to preview"),
@@ -790,9 +799,11 @@ server.tool(
   "rift_offramp",
   `Withdraw crypto to fiat. REAL PAYMENT — confirm with user. Requires: login + merchant approval + KYC (>$20) + OTP/password.
 
+WARNING: This call can take 30-60+ seconds (on-chain tx + fiat settlement). A timeout does NOT mean failure — always check rift_poll_offramp_status with the transactionCode to confirm the actual status.
+
 The 'recipient' field is a JSON string whose structure depends on the currency:
 
-KES (Kenya Mobile — Pretium): {"type":"MOBILE","accountIdentifier":"+254...","institution":"Safaricom"}
+KES (Kenya Mobile — Pretium): {"type":"MOBILE","accountIdentifier":"+254...","institution":"Safaricom"} — accountName is NOT required for KES/M-Pesa
 KES (Kenya Paybill): {"type":"PAYBILL","accountIdentifier":"shortcode","accountNumber":"acct_num","institution":"Safaricom"}
 NGN (Nigeria Bank — Paycrest): {"bankCode":"GTBINGLA","accountIdentifier":"0123456789","accountName":"John Doe","institution":"GTBank"}
 UGX (Uganda Mobile): {"bankCode":"MOMOUGPC","accountIdentifier":"+256...","accountName":"Name","institution":"MTN"}
