@@ -669,8 +669,8 @@ server.tool(
   "rift_get_balance",
   "Get wallet balance. Returns crypto balances (USDC, USDT, ETH, etc), NOT fiat amounts. Call with no params for all balances across all chains. To display in local fiat: call rift_preview_exchange_rate with type='offramp', then multiply USDC balance × buying_rate. Requires login.",
   {
-    chain: z.string().optional().describe("Filter by chain: BASE, POLYGON, ARBITRUM, ETHEREUM, LISK, BNB, BERACHAIN, CELO"),
-    token: z.string().optional().describe("Filter by token: USDC, USDT, ETH, BTC, etc"),
+    chain: z.string().optional().describe("Optional filter by chain: BASE, POLYGON, ARBITRUM, ETHEREUM, LISK, BNB, BERACHAIN, CELO. Omit for all chains"),
+    token: z.string().optional().describe("Optional filter by token: USDC, USDT, ETH, BTC, etc. Omit for all tokens"),
   },
   async (args) => {
     const authErr = requireAuth();
@@ -817,12 +817,12 @@ BRL (Brazil PIX): {"bankCode":"PIXKBRPC","accountIdentifier":"pix_key","accountN
 Call rift_get_payment_methods first to get valid bankCode and institution values for the user's currency.
 Use amount (USDC) or localAmount (exact fiat payout). Use rift_preview_exchange_rate with type='offramp' to show rates/fees first.`,
   {
-    token: z.string().default("USDC").describe("USDC or USDT"),
-    amount: z.number().optional().describe("Amount in USDC to sell. Omit if using localAmount"),
-    localAmount: z.number().optional().describe("Exact fiat amount user wants to RECEIVE (guarantees payout). Omit if using amount"),
-    currency: z.string().describe("KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL"),
-    chain: z.string().default("BASE").describe("BASE, ARBITRUM, POLYGON, ETHEREUM, CELO"),
-    recipient: z.string().describe("JSON string — structure depends on currency. See tool description for formats. Call rift_get_payment_methods to find valid bankCode/institution values"),
+    token: z.string().describe("REQUIRED. Token to sell: USDC or USDT"),
+    amount: z.number().optional().describe("Amount in USDC to sell. Provide this OR localAmount, not both"),
+    localAmount: z.number().optional().describe("Exact fiat amount user wants to RECEIVE. Provide this OR amount, not both"),
+    currency: z.string().describe("REQUIRED. Fiat currency: KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL"),
+    chain: z.string().describe("REQUIRED. Source chain: BASE, ARBITRUM, POLYGON, ETHEREUM, CELO"),
+    recipient: z.string().describe("REQUIRED. JSON string — structure depends on currency. See tool description for formats. Call rift_get_payment_methods to find valid bankCode/institution values"),
     otpCode: z.string().optional().describe("Fresh OTP — call rift_send_otp first. Required for email/phone users"),
     password: z.string().optional().describe("Password — required for externalId users"),
   },
@@ -831,7 +831,9 @@ Use amount (USDC) or localAmount (exact fiat payout). Use rift_preview_exchange_
     if (authErr) return ok(authErr);
     try {
       const body: any = {
-        token: args.token, currency: args.currency, chain: args.chain,
+        token: args.token || "USDC",
+        currency: args.currency,
+        chain: args.chain || "BASE",
         recipient: args.recipient,
       };
       if (args.amount) body.amount = args.amount;
@@ -848,11 +850,11 @@ server.tool(
   "rift_offramp_create_order",
   "DO NOT USE — use rift_offramp instead. This is a legacy endpoint that does the same thing. REAL PAYMENT — confirm with user.",
   {
-    token: z.string().default("USDC").describe("USDC or USDT"),
-    amount: z.number().optional().describe("Amount in USDC"),
-    localAmount: z.number().optional().describe("Exact fiat payout amount"),
-    currency: z.string().describe("KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL"),
-    chain: z.string().default("BASE").describe("BASE, ARBITRUM, POLYGON, ETHEREUM, CELO"),
+    token: z.string().describe("REQUIRED. USDC or USDT"),
+    amount: z.number().optional().describe("Amount in USDC. Provide this OR localAmount"),
+    localAmount: z.number().optional().describe("Exact fiat payout amount. Provide this OR amount"),
+    currency: z.string().describe("REQUIRED. KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL"),
+    chain: z.string().describe("REQUIRED. BASE, ARBITRUM, POLYGON, ETHEREUM, CELO"),
     recipient: z.string().describe("JSON string — same format as rift_offramp. See rift_offramp description for per-currency structure"),
     otpCode: z.string().optional().describe("OTP code — required for email/phone users"),
     password: z.string().optional().describe("Password — required for externalId users"),
@@ -932,10 +934,10 @@ server.tool(
   "rift_buy_crypto",
   "Buy crypto with mobile money (M-Pesa, etc). REAL PAYMENT — confirm with user. The 'amount' here is in LOCAL FIAT currency (e.g. 1000 = 1000 KES), NOT in USDC. Use rift_preview_exchange_rate with type='onramp' first to show how much USDC they'll get. Requires: login + merchant approval + KYC (for >$20). Does NOT require OTP. User receives a mobile money prompt on their phone.",
   {
-    shortcode: z.string().describe("Payment shortcode e.g. MPESA_KE"),
-    amount: z.number().describe("Amount in LOCAL FIAT currency (e.g. 1000 for 1000 KES) — NOT in USDC"),
-    chain: z.string().default("BASE").describe("Destination chain for crypto"),
-    asset: z.string().default("USDC").describe("Crypto to buy"),
+    shortcode: z.string().describe("REQUIRED. Payment shortcode e.g. MPESA_KE"),
+    amount: z.number().describe("REQUIRED. Amount in LOCAL FIAT currency (e.g. 1000 for 1000 KES) — NOT in USDC"),
+    chain: z.string().describe("REQUIRED. Destination chain: BASE, ARBITRUM, POLYGON, ETHEREUM, CELO"),
+    asset: z.string().describe("REQUIRED. Crypto to buy: USDC or USDT"),
     mobile_network: z.string().describe("Network: Safaricom, Airtel, MTN, Vodacom, Orange Money, Telebirr, TNM, etc"),
     country_code: z.string().describe("Country: KE, NG, UG, GH, ET, CD, TZ, MW, BR"),
   },
