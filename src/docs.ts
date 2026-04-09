@@ -309,10 +309,13 @@ export const SUPPORTED_CHAINS = [
 ];
 
 export const SUPPORTED_CURRENCIES = [
-  { code: "KES", country: "Kenya", methods: ["M-Pesa", "Bank Transfer"] },
-  { code: "NGN", country: "Nigeria", methods: ["Bank Transfer"] },
-  { code: "UGX", country: "Uganda", methods: ["Mobile Money"] },
-  { code: "GHS", country: "Ghana", methods: ["Mobile Money"] },
+  { code: "KES", country: "Kenya", methods: ["M-Pesa (Safaricom)", "Airtel", "Paybill", "Buy Goods", "Bank Transfer"] },
+  { code: "NGN", country: "Nigeria", methods: ["Bank Transfer (GTBank, Access, UBA, Zenith, First Bank, etc.)"] },
+  { code: "UGX", country: "Uganda", methods: ["MTN Mobile Money", "Airtel Money"] },
+  { code: "GHS", country: "Ghana", methods: ["MTN Mobile Money", "Vodafone Cash", "AirtelTigo", "Bank Transfer"] },
   { code: "ETB", country: "Ethiopia", methods: ["Telebirr", "CBE Birr"] },
-  { code: "CDF", country: "DR Congo", methods: ["Mobile Money"] },
+  { code: "CDF", country: "DR Congo", methods: ["Orange Money", "Airtel Money"] },
+  { code: "TZS", country: "Tanzania", methods: ["Vodacom M-Pesa", "Airtel Money", "Halopesa", "Bank Transfer"] },
+  { code: "MWK", country: "Malawi", methods: ["Airtel Money", "TNM Mpamba", "Bank Transfer"] },
+  { code: "BRL", country: "Brazil", methods: ["PIX"] },
 ];

@@ -89,18 +89,30 @@ Gasless = no gas fees for the user.`,
       offramp: `## Withdraw to Fiat (Offramp) Flow
 Prerequisites: user must be logged in, merchant-approved, KYC verified (for >$20)
 
-1. Ask user: how much to withdraw, which currency (KES, NGN, etc.)
-2. Call rift_preview_exchange_rate with type: "offramp" AND the amount — this returns the rate AND feeBreakdown (fee, feePercentage, userReceivesFiat, totalUsdcNeeded). Show this to user.
-3. Call rift_get_payment_methods with currency to find valid bankCode values
-4. Ask user for recipient details (name, phone/account number)
-5. Confirm everything with user (amount, fee, what they'll receive in fiat)
-7. Call rift_send_otp to send OTP for transaction auth
-8. Ask user for OTP code
-9. Call rift_offramp with all details + otpCode
-10. Return transaction code, then optionally poll with rift_poll_offramp_status
+1. Ask user: how much to withdraw, which currency (KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL)
+2. Call rift_preview_exchange_rate with type: "offramp" AND the amount — shows rate + feeBreakdown
+3. Call rift_get_payment_methods with currency — returns valid bankCode and institution values
+4. Ask user for recipient details. The recipient JSON structure depends on the currency:
 
-M-Pesa example: bankCode="MPESA", accountNumber="+254712345678"
-IMPORTANT: Do NOT use an onramp rate for offramp. Always set type="offramp".`,
+   KES M-Pesa: {"type":"MOBILE","accountIdentifier":"+254...","institution":"Safaricom"}
+   KES Paybill: {"type":"PAYBILL","accountIdentifier":"shortcode","accountNumber":"acct","institution":"Safaricom"}
+   NGN Bank: {"bankCode":"GTBINGLA","accountIdentifier":"0123456789","accountName":"Name","institution":"GTBank"}
+   UGX Mobile: {"bankCode":"MOMOUGPC","accountIdentifier":"+256...","accountName":"Name","institution":"MTN"}
+   GHS Mobile: {"bankCode":"MOMOGHPC","accountIdentifier":"+233...","accountName":"Name","institution":"MTN"}
+   ETB Mobile: {"bankCode":"TELEBPC","accountIdentifier":"+251...","accountName":"Name","institution":"Telebirr"}
+   TZS Mobile: {"bankCode":"TIGOTZPC","accountIdentifier":"+255...","accountName":"Name","institution":"Vodacom"}
+   BRL PIX: {"bankCode":"PIXKBRPC","accountIdentifier":"pix_key","accountName":"Name","institution":"pix"}
+
+5. Confirm everything with user (amount, fee, what they'll receive in fiat)
+6. Call rift_send_otp to send OTP for transaction auth
+7. Ask user for OTP code
+8. Call rift_offramp with: token, amount (or localAmount for exact fiat payout), currency, chain, recipient (JSON string), otpCode
+9. Return transaction code, poll with rift_poll_offramp_status
+
+Providers: KES uses Pretium (supports M-Pesa/Paybill/BuyGoods). NGN/UGX/GHS/ETB/CDF/TZS/MWK/BRL use Paycrest.
+Supported chains: BASE, ARBITRUM, POLYGON, ETHEREUM, CELO. Tokens: USDC, USDT.
+Use localAmount instead of amount to guarantee exact fiat payout.
+IMPORTANT: Do NOT use an onramp rate for offramp.`,
 
       onramp: `## Buy Crypto (Onramp) Flow
 Prerequisites: user must be logged in, merchant-approved, KYC verified (for >$20)
@@ -752,7 +764,7 @@ server.tool(
   "rift_preview_exchange_rate",
   "Preview exchange rate for offramp or onramp. IMPORTANT: offramp and onramp rates are DIFFERENT. Always set type to match the operation. The response includes selling_rate (for offramp), buying_rate (for onramp), and fee breakdown. Do NOT use an offramp rate to estimate onramp, or vice versa.",
   {
-    currency: z.string().describe("Fiat currency: KES, NGN, UGX, GHS, ETB, CDF"),
+    currency: z.string().describe("Fiat currency: KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL"),
     amount: z.number().optional().describe("Amount in USDC to preview"),
     type: z.enum(["offramp", "onramp"]).describe("MUST match operation: 'offramp' = selling crypto, 'onramp' = buying crypto"),
   },
@@ -765,7 +777,7 @@ server.tool(
 server.tool(
   "rift_get_payment_methods",
   "Get supported banks and mobile money providers for a currency. Use the bankCode values from here in rift_offramp. E.g. for Kenya: MPESA for M-Pesa. Requires login.",
-  { currency: z.string().describe("Currency code: KES, NGN, UGX, GHS, ETB, CDF") },
+  { currency: z.string().describe("Currency code: KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL") },
   async ({ currency }) => {
     const authErr = requireAuth();
     if (authErr) return ok(authErr);
@@ -776,16 +788,30 @@ server.tool(
 
 server.tool(
   "rift_offramp",
-  "Withdraw crypto to fiat (M-Pesa, bank, mobile money). REAL PAYMENT — confirm with user. Requires: (1) login, (2) merchant approval, (3) KYC for >$20, (4) OTP or password. Flow: rift_preview_exchange_rate → rift_get_payment_methods → rift_send_otp → rift_offramp.",
+  `Withdraw crypto to fiat. REAL PAYMENT — confirm with user. Requires: login + merchant approval + KYC (>$20) + OTP/password.
+
+The 'recipient' field is a JSON string whose structure depends on the currency:
+
+KES (Kenya Mobile — Pretium): {"type":"MOBILE","accountIdentifier":"+254...","institution":"Safaricom"}
+KES (Kenya Paybill): {"type":"PAYBILL","accountIdentifier":"shortcode","accountNumber":"acct_num","institution":"Safaricom"}
+NGN (Nigeria Bank — Paycrest): {"bankCode":"GTBINGLA","accountIdentifier":"0123456789","accountName":"John Doe","institution":"GTBank"}
+UGX (Uganda Mobile): {"bankCode":"MOMOUGPC","accountIdentifier":"+256...","accountName":"Name","institution":"MTN"}
+GHS (Ghana Mobile): {"bankCode":"MOMOGHPC","accountIdentifier":"+233...","accountName":"Name","institution":"MTN"}
+ETB (Ethiopia Mobile): {"bankCode":"TELEBPC","accountIdentifier":"+251...","accountName":"Name","institution":"Telebirr"}
+CDF (Congo Mobile): {"bankCode":"OMONDFPC","accountIdentifier":"+243...","accountName":"Name","institution":"Orange Money"}
+TZS (Tanzania Mobile): {"bankCode":"TIGOTZPC","accountIdentifier":"+255...","accountName":"Name","institution":"Vodacom"}
+MWK (Malawi Mobile): {"bankCode":"AIRTMWPC","accountIdentifier":"+265...","accountName":"Name","institution":"Airtel"}
+BRL (Brazil PIX): {"bankCode":"PIXKBRPC","accountIdentifier":"pix_key","accountName":"Name","institution":"pix"}
+
+Call rift_get_payment_methods first to get valid bankCode and institution values for the user's currency.
+Use amount (USDC) or localAmount (exact fiat payout). Use rift_preview_exchange_rate with type='offramp' to show rates/fees first.`,
   {
-    token: z.string().default("USDC").describe("Token to sell (usually USDC)"),
-    amount: z.number().describe("Amount in crypto (e.g. 100 for 100 USDC)"),
-    localAmount: z.number().optional().describe("Alternative: amount in local fiat"),
-    currency: z.string().describe("Fiat currency: KES, NGN, UGX, GHS, ETB, CDF"),
-    chain: z.string().default("BASE").describe("Source chain: BASE or POLYGON"),
-    recipientName: z.string().describe("Recipient's full name"),
-    bankCode: z.string().describe("From rift_get_payment_methods — e.g. 'MPESA' for M-Pesa"),
-    accountNumber: z.string().describe("Phone number (for M-Pesa, e.g. '+254712345678') or bank account number"),
+    token: z.string().default("USDC").describe("USDC or USDT"),
+    amount: z.number().optional().describe("Amount in USDC to sell. Omit if using localAmount"),
+    localAmount: z.number().optional().describe("Exact fiat amount user wants to RECEIVE (guarantees payout). Omit if using amount"),
+    currency: z.string().describe("KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL"),
+    chain: z.string().default("BASE").describe("BASE, ARBITRUM, POLYGON, ETHEREUM, CELO"),
+    recipient: z.string().describe("JSON string — structure depends on currency. See tool description for formats. Call rift_get_payment_methods to find valid bankCode/institution values"),
     otpCode: z.string().optional().describe("Fresh OTP — call rift_send_otp first. Required for email/phone users"),
     password: z.string().optional().describe("Password — required for externalId users"),
   },
@@ -794,12 +820,14 @@ server.tool(
     if (authErr) return ok(authErr);
     try {
       const body: any = {
-        token: args.token, amount: args.amount, currency: args.currency, chain: args.chain,
-        recipient: JSON.stringify({ name: args.recipientName, bankCode: args.bankCode, accountNumber: args.accountNumber }),
+        token: args.token, currency: args.currency, chain: args.chain,
+        recipient: args.recipient,
       };
+      if (args.amount) body.amount = args.amount;
       if (args.localAmount) body.localAmount = args.localAmount;
       if (args.otpCode) body.otpCode = args.otpCode;
       if (args.password) body.password = args.password;
+      if (!args.amount && !args.localAmount) return ok("Error: provide either 'amount' (USDC) or 'localAmount' (fiat to receive). Use rift_preview_exchange_rate to check rates.");
       return json(await client.request("POST", "/api/v1/offramp/pay", { body }), "Offramp submitted! Use rift_poll_offramp_status to track the order.");
     } catch (e: any) { return err(e); }
   }
@@ -807,14 +835,14 @@ server.tool(
 
 server.tool(
   "rift_offramp_create_order",
-  "DO NOT USE unless specifically asked. This is an older alternative to rift_offramp that hits a different backend path. Use rift_offramp instead — it does the same thing but with a better interface (separate recipientName/bankCode/accountNumber params instead of a raw JSON string). Same requirements: login + merchant approval + KYC + OTP/password.",
+  "DO NOT USE — use rift_offramp instead. This is a legacy endpoint that does the same thing. REAL PAYMENT — confirm with user.",
   {
-    token: z.string().default("USDC"),
-    amount: z.number().describe("Amount in crypto"),
-    localAmount: z.number().optional().describe("Amount in local fiat"),
-    currency: z.string().describe("Fiat currency: KES, NGN, etc"),
-    chain: z.string().default("BASE"),
-    recipient: z.string().describe("JSON string: {name, bankCode, accountNumber}"),
+    token: z.string().default("USDC").describe("USDC or USDT"),
+    amount: z.number().optional().describe("Amount in USDC"),
+    localAmount: z.number().optional().describe("Exact fiat payout amount"),
+    currency: z.string().describe("KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL"),
+    chain: z.string().default("BASE").describe("BASE, ARBITRUM, POLYGON, ETHEREUM, CELO"),
+    recipient: z.string().describe("JSON string — same format as rift_offramp. See rift_offramp description for per-currency structure"),
     otpCode: z.string().optional().describe("OTP code — required for email/phone users"),
     password: z.string().optional().describe("Password — required for externalId users"),
   },
@@ -897,8 +925,8 @@ server.tool(
     amount: z.number().describe("Amount in LOCAL FIAT currency (e.g. 1000 for 1000 KES) — NOT in USDC"),
     chain: z.string().default("BASE").describe("Destination chain for crypto"),
     asset: z.string().default("USDC").describe("Crypto to buy"),
-    mobile_network: z.string().describe("Network: Safaricom, Airtel, MTN, etc"),
-    country_code: z.string().describe("Country: KE, NG, UG, GH, etc"),
+    mobile_network: z.string().describe("Network: Safaricom, Airtel, MTN, Vodacom, Orange Money, Telebirr, TNM, etc"),
+    country_code: z.string().describe("Country: KE, NG, UG, GH, ET, CD, TZ, MW, BR"),
   },
   async (args) => {
     const authErr = requireAuth();
@@ -1069,7 +1097,7 @@ server.tool(
   "Pair with a DApp via WalletConnect. User provides a wc: URI (usually from a QR code). Requires login.",
   {
     uri: z.string().describe("WalletConnect URI starting with wc:"),
-    chain: z.string().describe("Chain to connect on: BASE, ETHEREUM, POLYGON, etc"),
+    chain: z.string().describe("Chain: BASE, ETHEREUM, POLYGON, ARBITRUM, CELO, etc"),
   },
   async (args) => {
     const authErr = requireAuth();
@@ -1148,7 +1176,7 @@ server.tool(
   "Create a payment invoice and get a payment URL. No OTP required. KYC required for >$20. Requires login.",
   {
     description: z.string().describe("Invoice description (shown to payer)"),
-    chain: z.string().describe("Chain: BASE, POLYGON, etc"),
+    chain: z.string().describe("Chain: BASE, POLYGON, ARBITRUM, ETHEREUM, CELO, etc"),
     token: z.string().describe("Token: USDC, USDT"),
     amount: z.number().describe("Amount to invoice"),
     recipientEmail: z.string().optional().describe("Customer's email — sends invoice link"),
