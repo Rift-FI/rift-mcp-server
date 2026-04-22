@@ -97,24 +97,6 @@ export const SDK_SERVICES: ServiceDoc[] = [
     ],
   },
   {
-    name: "Vault",
-    sdkAccessor: "rift.vault",
-    description: "DeFi yield vault for USDC on Base. Deposit, withdraw, claim rewards",
-    methods: [
-      { name: "getProtocolStats", description: "Get all protocol stats (TVL, deposits, rewards, etc)", signature: "getProtocolStats(): Promise<ProtocolStats>", example: `const stats = await rift.vault.getProtocolStats();`, auth: "none" },
-      { name: "getTvl", description: "Get total value locked", signature: "getTvl(): Promise<VaultTvlResponse>", example: `const { tvl } = await rift.vault.getTvl();`, auth: "none" },
-      { name: "getMyVaultData", description: "Get user's vault position (balance, rewards, pending)", signature: "getMyVaultData(): Promise<UserVaultData>", example: `const data = await rift.vault.getMyVaultData();`, auth: "jwt" },
-      { name: "getMyBalance", description: "Get user's deposited balance", signature: "getMyBalance(): Promise<UserVaultBalanceResponse>", example: `const { balance } = await rift.vault.getMyBalance();`, auth: "jwt" },
-      { name: "getMyRewards", description: "Get user's pending rewards", signature: "getMyRewards(): Promise<UserVaultRewardsResponse>", example: `const { rewards } = await rift.vault.getMyRewards();`, auth: "jwt" },
-      { name: "getMyWhitelistStatus", description: "Check if user's smart wallet is whitelisted", signature: "getMyWhitelistStatus(): Promise<UserVaultWhitelistResponse>", example: `const { isWhitelisted } = await rift.vault.getMyWhitelistStatus();`, auth: "jwt" },
-      { name: "deposit", description: "Deposit USDC into vault (gasless, auto-approves)", signature: "deposit(request: VaultDepositRequest): Promise<VaultDepositResponse>", example: `const deposit = await rift.vault.deposit({ amount: '100' });`, auth: "jwt" },
-      { name: "withdraw", description: "Request withdrawal (queued, batch processed daily)", signature: "withdraw(request: VaultWithdrawRequest): Promise<VaultTransactionResponse>", example: `await rift.vault.withdraw({ amount: '50' });`, auth: "jwt" },
-      { name: "cancelWithdrawal", description: "Cancel pending withdrawal", signature: "cancelWithdrawal(): Promise<VaultTransactionResponse>", example: `await rift.vault.cancelWithdrawal();`, auth: "jwt" },
-      { name: "claimRewards", description: "Request reward claim (queued)", signature: "claimRewards(): Promise<VaultTransactionResponse>", example: `await rift.vault.claimRewards();`, auth: "jwt" },
-      { name: "cancelClaim", description: "Cancel pending claim", signature: "cancelClaim(): Promise<VaultTransactionResponse>", example: `await rift.vault.cancelClaim();`, auth: "jwt" },
-    ],
-  },
-  {
     name: "KYC",
     sdkAccessor: "rift.kyc",
     description: "Identity verification via SmileID and Sumsub",
@@ -169,7 +151,7 @@ export const SDK_SERVICES: ServiceDoc[] = [
     methods: [
       { name: "getWalletInstance", description: "Get wallet instance for a chain", signature: "getWalletInstance(request: GetWalletInstanceRequest): Promise<WalletInstanceResponse>", example: `const wallet = await rift.signer.getWalletInstance({ chain: 'BASE' });`, auth: "jwt" },
       { name: "signTransaction", description: "Sign transaction without broadcasting", signature: "signTransaction(request: SignTransactionRequest): Promise<SignTransactionResponse>", example: `const signed = await rift.signer.signTransaction({ chain: 'BASE', transactionData: { to: '0x...', value: '0', data: '0x...' } });`, auth: "jwt" },
-      { name: "sendTransaction", description: "Sign and broadcast transaction", signature: "sendTransaction(request: SendTransactionRequest): Promise<SendTransactionResponse>", example: `const result = await rift.signer.sendTransaction({ chain: 'BASE', transactionData: { to: '0x...', value: '1000000' } });`, auth: "jwt" },
+      { name: "sendTransaction", description: "Execute a call through the user's smart wallet as an ERC-4337 UserOperation. The on-chain sender is the smart wallet, signed by the EOA owner. Returns { hash, userOperationHash, from (smart wallet), owner (EOA), chainId }. `hash` is a UserOperation hash (NOT a classic tx hash) — do not query it via eth_getTransactionByHash or look it up on etherscan.io/tx/. Gas is sponsored by default; pass an ERC-20 paymasterToken to pay gas in a token instead.", signature: "sendTransaction(request: SendTransactionRequest): Promise<SendTransactionResponse>", example: `const result = await rift.signer.sendTransaction({ chain: 'BASE', transactionData: { to: '0x...', value: '1000000' } });\n// result.hash is a UserOperation hash\n// result.from is the smart wallet address`, auth: "jwt" },
       { name: "signMessage", description: "Sign an arbitrary message", signature: "signMessage(request: SignMessageRequest): Promise<SignMessageResponse>", example: `const result = await rift.signer.signMessage({ chain: 'BASE', message: 'Hello' });`, auth: "jwt" },
     ],
   },

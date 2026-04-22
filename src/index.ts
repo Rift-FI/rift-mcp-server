@@ -56,8 +56,8 @@ function requireAuth(): string | null {
 
 server.tool(
   "rift_guide",
-  "START HERE. Get step-by-step instructions for any Rift operation. Call this FIRST when a user asks to do something and you're not sure of the exact flow. Covers: send crypto, withdraw to M-Pesa, buy crypto, bridge, vault, check balance, login, KYC, invoices, WalletConnect, auto-swap, and more.",
-  { task: z.string().describe("What the user wants to do, e.g. 'send USDC', 'withdraw to M-Pesa', 'check balance', 'bridge tokens', 'deposit to vault', 'create invoice', 'sign up'") },
+  "START HERE. Get step-by-step instructions for any Rift operation. Call this FIRST when a user asks to do something and you're not sure of the exact flow. Covers: send crypto, withdraw to M-Pesa, buy crypto, bridge, check balance, login, KYC, invoices, WalletConnect, auto-swap, and more.",
+  { task: z.string().describe("What the user wants to do, e.g. 'send USDC', 'withdraw to M-Pesa', 'check balance', 'bridge tokens', 'create invoice', 'sign up'") },
   async ({ task }) => {
     const t = task.toLowerCase();
 
@@ -139,15 +139,6 @@ Prerequisites: user must be logged in
 No OTP required for bridge.
 Supported tokens: USDC, USDT.`,
 
-      vault: `## Vault (Yield) Flow
-Prerequisites: user must be logged in, smart wallet must be whitelisted
-
-1. Check stats: call rift_search_docs with query "vault" for SDK methods
-2. For vault operations, use the Rift SDK directly (vault is accessed through the SDK, not the API wrapper)
-3. User can deposit USDC, withdraw, claim rewards, check balance
-
-The vault is on Base network. Deposits are gasless. Withdrawals and claims are queued and batch-processed daily.`,
-
       balance: `## Check Balance Flow
 Prerequisites: user must be logged in
 
@@ -171,7 +162,7 @@ No OTP required for invoice creation.`,
 3. Return the verificationUrl to the user — they complete verification there
 4. Poll with rift_kyc_job_status or rift_kyc_is_verified to check when done
 
-KYC is required for: offramp/onramp above $20, vault deposits/withdrawals.
+KYC is required for: offramp/onramp above $20.
 Providers: SmileID (Africa), Sumsub (global).`,
 
       walletconnect: `## WalletConnect Flow
@@ -213,14 +204,19 @@ Only USDC and USDT are auto-swapped. Other tokens stay on the receiving chain.`,
 4. User receives OTP on recovery email/phone
 5. Call rift_reset_password with username, newPassword, email/phoneNumber, otpCode`,
 
-      signer: `## Sign Transactions Flow
+      signer: `## Sign / Send Low-Level Transactions Flow
 Prerequisites: user must be logged in
 
-For signing raw transactions or messages:
-1. Call rift_get_wallet_instance with chain to get wallet address and info
-2. Call rift_sign_transaction to sign without broadcasting
-3. Call rift_send_transaction to sign AND broadcast
-4. Call rift_sign_message for arbitrary message signing (e.g. for DApp authentication)`,
+1. Call rift_get_wallet_instance with chain to get wallet info
+2. Call rift_sign_transaction to sign a raw tx without broadcasting
+3. Call rift_send_transaction to EXECUTE a call via the user's smart wallet as an ERC-4337 UserOperation
+4. Call rift_sign_message for arbitrary message signing (DApp auth, etc.)
+
+IMPORTANT about rift_send_transaction:
+- Sender on-chain is the user's SMART WALLET (not EOA). Response 'from' = smart wallet.
+- Returned 'hash' is a userOperationHash — NOT a classic tx hash. Never link it as etherscan.io/tx/<hash>. Use jiffyscan.xyz/userOpHash/<hash> or a bundler RPC instead.
+- Gas is sponsored by default; pass paymasterToken (ERC-20 address) to pay gas in a token.
+- Use rift_send_crypto for simple token transfers instead — it's higher-level and user-friendly.`,
 
       suspend: `## User Management Flow
 For project admins to manage users:
@@ -237,7 +233,6 @@ For project admins to manage users:
     else if (t.includes("withdraw") || t.includes("offramp") || t.includes("cash out") || t.includes("mpesa") || t.includes("m-pesa") || t.includes("bank") || t.includes("fiat")) matched = flows.offramp;
     else if (t.includes("buy") || t.includes("onramp") || t.includes("purchase") || t.includes("deposit fiat") || t.includes("top up")) matched = flows.onramp;
     else if (t.includes("bridge") || t.includes("cross-chain") || t.includes("move") || t.includes("cross chain")) matched = flows.bridge;
-    else if (t.includes("vault") || t.includes("yield") || t.includes("deposit usdc") || t.includes("earn")) matched = flows.vault;
     else if (t.includes("balance") || t.includes("check") || t.includes("how much") || t.includes("wallet")) matched = flows.balance;
     else if (t.includes("invoice") || t.includes("bill") || t.includes("merchant")) matched = flows.invoice;
     else if (t.includes("kyc") || t.includes("verify") || t.includes("identity")) matched = flows.kyc;
@@ -262,7 +257,6 @@ I can help with any of these. Tell me what you need:
 - **Withdraw to fiat** — cash out to M-Pesa, bank transfer (KES, NGN, UGX, GHS, ETB, CDF)
 - **Buy crypto** — purchase USDC with mobile money
 - **Bridge** — move tokens cross-chain (Arbitrum, Base, Polygon, Ethereum, etc.)
-- **Vault** — deposit USDC for yield on Base
 - **Check balance** — see all token balances across chains
 - **Create invoice** — invoice customers for crypto payment
 - **KYC verification** — identity verification for compliance
@@ -286,7 +280,7 @@ Current status:
 server.tool(
   "rift_search_docs",
   "Search Rift Finance SDK/API documentation. Returns method signatures, code examples, and auth requirements.",
-  { query: z.string().describe("What you want to look up (e.g. 'send USDC', 'offramp', 'vault deposit')") },
+  { query: z.string().describe("What you want to look up (e.g. 'send USDC', 'offramp', 'bridge quote')") },
   async ({ query }) => {
     const words = query.toLowerCase().split(/\s+/);
     const results: string[] = [];
@@ -299,7 +293,7 @@ server.tool(
         }
       }
     }
-    return results.length ? ok(results.slice(0, 8).join("\n\n---\n\n")) : ok(`No results for "${query}". Try: auth, wallet, transactions, offramp, onramp, bridge, vault, kyc, walletconnect, merchant, notifications, signer, assets`);
+    return results.length ? ok(results.slice(0, 8).join("\n\n---\n\n")) : ok(`No results for "${query}". Try: auth, wallet, transactions, offramp, onramp, bridge, kyc, walletconnect, merchant, notifications, signer, assets`);
   }
 );
 
@@ -1323,19 +1317,33 @@ server.tool(
 
 server.tool(
   "rift_send_transaction",
-  "Sign AND broadcast a raw blockchain transaction (low-level). This is NOT for sending tokens to someone — use rift_send_crypto for that. This is for advanced use: calling smart contracts, sending ETH, etc. REAL TX — confirm with user. Requires login.",
+  `Execute a call through the user's SMART WALLET as an ERC-4337 UserOperation. For advanced use (contract calls, native transfers) — for simple token sends use rift_send_crypto instead. REAL TX — confirm with user.
+
+Semantics an AI MUST know:
+- The on-chain sender is the user's SMART WALLET, NOT their EOA. The response 'from' field is the smart wallet address.
+- The returned 'hash' is a UserOperation hash (NOT a classic Ethereum tx hash). Do NOT link it as etherscan.io/tx/<hash> — that will 404. To track, use a bundler-aware explorer (jiffyscan.xyz/userOpHash/<hash>) or poll a bundler via eth_getUserOperationByHash.
+- Gas is sponsored by default. Pass 'paymasterToken' (ERC-20 contract address) to pay gas in a token like USDC instead.
+- Response fields: { success, hash (userOp), userOperationHash, transactionHash? (only on Lisk), from (smart wallet), owner (EOA), chainId, gasUsed?, paymasterToken }. Fields 'nonce', 'gasPrice', 'blockNumber' are NOT returned — UserOps don't have them.
+
+Requires login.`,
   {
-    chain: z.string().describe("Chain"),
-    to: z.string().optional().describe("Contract/recipient address"),
-    value: z.string().optional().describe("Value in wei"),
-    data: z.string().optional().describe("Encoded contract call data (hex)"),
+    chain: z.string().describe("Chain: BASE, POLYGON, ARBITRUM, ETHEREUM, etc"),
+    to: z.string().describe("Contract or recipient address (0x...)"),
+    value: z.string().optional().describe("Native value in wei (decimal string)"),
+    data: z.string().optional().describe("Encoded contract call data (hex, starts with 0x)"),
+    paymasterToken: z.string().optional().describe("Optional ERC-20 token contract address to pay gas with. Omit for sponsored gas (free to user)."),
   },
   async (args) => {
     const authErr = requireAuth();
     if (authErr) return ok(authErr);
     try {
-      const { chain, ...txData } = args;
-      return json(await client.request("POST", "/api/v1/signer/send-transaction", { body: { chain, transactionData: txData } }), "Transaction broadcast!");
+      const { chain, paymasterToken, ...txData } = args;
+      const body: any = { chain, transactionData: txData };
+      if (paymasterToken) body.paymasterToken = paymasterToken;
+      return json(
+        await client.request("POST", "/api/v1/signer/send-transaction", { body }),
+        "UserOperation submitted. Note: 'hash' is a userOperationHash, not a classic tx hash — do not link it as etherscan.io/tx/..."
+      );
     } catch (e: any) { return err(e); }
   }
 );
