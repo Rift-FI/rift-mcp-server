@@ -64,12 +64,37 @@ server.tool(
     const flows: Record<string, string> = {
       setup: `## Setup Flow
 1. Call rift_set_api_key with the user's API key (starts with sk_)
-2. Call rift_send_otp with the user's email or phone
-3. Ask user for the OTP code they received
-4. Call rift_login with email/phone + otpCode (or externalId + password)
-5. Done — all authenticated tools now work
+2. Pick the auth method:
+   - **Email/phone OTP**: rift_send_otp → ask user for code → rift_login
+   - **External ID + password**: rift_login (no OTP step)
+   - **Google**: client gets a Google ID token → rift_login_google
+   - **Apple**: client gets an Apple identity token → rift_login_apple
+3. Done — all authenticated tools now work
 
 If user doesn't have an API key, they need to create a project first.`,
+
+      google: `## Google Sign-In Flow
+1. Call rift_set_api_key if not already set
+2. The frontend (NOT the agent) obtains a Google ID token via:
+   - Google One-Tap → use the \`credential\` field
+   - \`useGoogleLogin({ flow: 'implicit' })\` from @react-oauth/google → exchange the access token at Google's tokeninfo endpoint to get the ID token
+3. Pass the idToken to rift_login_google
+4. On first sign-in, an account is created with the email from the Google token and a wallet is provisioned
+5. After this, the account is BOUND to Google — password/OTP login is rejected for it. The user must keep using Google.
+
+The agent cannot generate the idToken itself — it must be provided by the user / client app.`,
+
+      apple: `## Apple Sign-In Flow
+1. Call rift_set_api_key if not already set
+2. The frontend obtains an Apple identity token:
+   - Web: \`AppleID.auth.signIn()\` → \`response.authorization.id_token\`
+   - iOS: \`ASAuthorizationAppleIDCredential.identityToken\`
+   - React Native: expo-apple-authentication or similar
+3. **First sign-in only**: Apple delivers email and (sometimes) name. If your client requested name scope, capture it and pass as displayName to rift_login_apple — Apple WILL NOT send it again.
+4. Subsequent sign-ins: Apple identifies the user by their stable \`sub\`; just pass idToken.
+5. Apple-bound accounts are NOT locked to Apple — if the user has a non-relay email on file, email/OTP login still works.
+
+The agent cannot generate the idToken itself.`,
 
       send: `## Send Crypto Flow
 Prerequisites: user must be logged in (rift_login)
@@ -137,7 +162,26 @@ Prerequisites: user must be logged in
 5. Return transaction hash — tokens arrive in 1-5 minutes
 
 No OTP required for bridge.
-Supported tokens: USDC, USDT.`,
+Supported tokens: USDC, USDT.
+
+For SAME-CHAIN token-for-token swaps (e.g. USDC → WETH on Base), use rift_swap instead — bridge is for cross-chain only.`,
+
+      swap: `## Token Swap Flow (Same-Chain)
+Prerequisites: user must be logged in
+
+For cross-chain token movement, use the bridge flow instead.
+
+1. Confirm with user: chain, what to sell, what to buy, amount
+2. Call rift_swap with:
+   - chain (e.g. BASE)
+   - flow: "gasless" (recommended — sponsored gas via UserOp) OR "normal" (user pays gas)
+   - token_to_sell + token_to_buy (symbols like USDC, WETH, USDT)
+   - value (amount of token_to_sell in human units, e.g. "10" for 10 USDC)
+   - token_to_sell_address / token_to_buy_address ONLY for arbitrary ERC-20s not in the SDK list
+   - isEth / isBuyingEth for native ETH legs
+3. Return the result
+
+No OTP required for swap.`,
 
       balance: `## Check Balance Flow
 Prerequisites: user must be logged in
@@ -227,17 +271,20 @@ For project admins to manage users:
 4. Call rift_unsuspend_user to restore access`,
     };
 
-    // Match the task to a flow
+    // Match the task to a flow. Order matters — more specific keywords first.
     let matched: string | undefined;
-    if (t.includes("send") || t.includes("transfer") || t.includes("pay someone")) matched = flows.send;
+    if (t.includes("google")) matched = flows.google;
+    else if (t.includes("apple")) matched = flows.apple;
+    else if (t.includes("auto-swap") || t.includes("autoswap") || t.includes("auto swap") || t.includes("consolidate")) matched = flows.autoswap;
+    else if (t.includes("send") || t.includes("transfer") || t.includes("pay someone")) matched = flows.send;
     else if (t.includes("withdraw") || t.includes("offramp") || t.includes("cash out") || t.includes("mpesa") || t.includes("m-pesa") || t.includes("bank") || t.includes("fiat")) matched = flows.offramp;
     else if (t.includes("buy") || t.includes("onramp") || t.includes("purchase") || t.includes("deposit fiat") || t.includes("top up")) matched = flows.onramp;
-    else if (t.includes("bridge") || t.includes("cross-chain") || t.includes("move") || t.includes("cross chain")) matched = flows.bridge;
+    else if (t.includes("bridge") || t.includes("cross-chain") || t.includes("cross chain")) matched = flows.bridge;
+    else if (t.includes("swap") || t.includes("trade") || t.includes("exchange token") || t.includes("convert token")) matched = flows.swap;
     else if (t.includes("balance") || t.includes("check") || t.includes("how much") || t.includes("wallet")) matched = flows.balance;
     else if (t.includes("invoice") || t.includes("bill") || t.includes("merchant")) matched = flows.invoice;
     else if (t.includes("kyc") || t.includes("verify") || t.includes("identity")) matched = flows.kyc;
     else if (t.includes("walletconnect") || t.includes("dapp") || t.includes("connect")) matched = flows.walletconnect;
-    else if (t.includes("auto-swap") || t.includes("autoswap") || t.includes("auto swap") || t.includes("consolidate")) matched = flows.autoswap;
     else if (t.includes("sign up") || t.includes("signup") || t.includes("register") || t.includes("create account")) matched = flows.signup;
     else if (t.includes("login") || t.includes("log in") || t.includes("authenticate") || t.includes("setup") || t.includes("get started")) matched = flows.setup;
     else if (t.includes("recover") || t.includes("forgot") || t.includes("reset password")) matched = flows.recovery;
@@ -257,12 +304,13 @@ I can help with any of these. Tell me what you need:
 - **Withdraw to fiat** — cash out to M-Pesa, bank transfer (KES, NGN, UGX, GHS, ETB, CDF)
 - **Buy crypto** — purchase USDC with mobile money
 - **Bridge** — move tokens cross-chain (Arbitrum, Base, Polygon, Ethereum, etc.)
+- **Swap** — same-chain token swaps (USDC ↔ WETH, etc.)
 - **Check balance** — see all token balances across chains
 - **Create invoice** — invoice customers for crypto payment
 - **KYC verification** — identity verification for compliance
 - **WalletConnect** — connect to DApps
 - **Auto-swap** — automatically bridge incoming tokens to preferred chain
-- **Sign up / Login** — create account or authenticate
+- **Sign up / Login** — create account or authenticate (email/phone OTP, externalId+password, Google, or Apple)
 - **Account recovery** — reset password via recovery methods
 - **Sign transactions** — sign or send raw blockchain transactions
 - **User management** — suspend/unsuspend users (admin)
@@ -431,6 +479,39 @@ server.tool(
       const result = await client.request<any>("POST", "/api/v1/auth/login", { body });
       client.setBearerToken(result.accessToken);
       return ok(`Logged in! Address: ${result.address}\nAll authenticated tools now work. You do NOT need to login again this session.`);
+    } catch (e: any) { return err(e); }
+  }
+);
+
+server.tool(
+  "rift_login_google",
+  "Sign in (or sign up on first use) with a Google ID token. The frontend obtains the idToken from Google's identity flow — for example, the `credential` from Google One-Tap, or an ID token from `useGoogleLogin({ flow: 'implicit' })` exchanged via Google's OAuth2 endpoint. NOT something the agent can produce on its own — ask the user / client for the idToken. Once an account is bound to Google, password/OTP login is rejected for that account; the user must keep using Google. After this call, all authenticated tools work.",
+  {
+    idToken: z.string().describe("Google ID token (JWT) obtained on the frontend from Google's identity flow"),
+    referrer: z.string().optional().describe("Optional referral code — propagated to the new user only on first sign-in (account creation)"),
+  },
+  async (args) => {
+    try {
+      const result = await client.request<any>("POST", "/api/v1/auth/google", { body: args });
+      client.setBearerToken(result.accessToken);
+      return ok(`Logged in with Google! Address: ${result.address}\nAll authenticated tools now work.`);
+    } catch (e: any) { return err(e); }
+  }
+);
+
+server.tool(
+  "rift_login_apple",
+  "Sign in (or sign up on first use) with an Apple identity token. The frontend obtains the idToken from 'Sign in with Apple' — `authorization.id_token` from `AppleID.auth.signIn()` on web, the identity token from `ASAuthorizationAppleIDCredential` on iOS, or expo-apple-authentication on RN. NOT something the agent can produce — ask the user / client for the idToken. Apple only delivers email/name on the FIRST sign-in (and only the privaterelay alias if 'Hide My Email' is on); pass displayName then. Apple-bound accounts are NOT locked to Apple — email/OTP still works for users with a non-relay email on file. After this call, all authenticated tools work.",
+  {
+    idToken: z.string().describe("Apple identity token (JWT) obtained on the frontend"),
+    displayName: z.string().optional().describe("First+last name composed by the client. Apple only delivers this on first sign-in — capture and forward it then."),
+    referrer: z.string().optional().describe("Optional referral code — propagated only on first sign-in (account creation)"),
+  },
+  async (args) => {
+    try {
+      const result = await client.request<any>("POST", "/api/v1/auth/apple", { body: args });
+      client.setBearerToken(result.accessToken);
+      return ok(`Logged in with Apple! Address: ${result.address}\nAll authenticated tools now work.`);
     } catch (e: any) { return err(e); }
   }
 );
@@ -1010,6 +1091,39 @@ server.tool(
     const authErr = requireAuth();
     if (authErr) return ok(authErr);
     try { return json(await client.request("POST", "/api/v1/bridge/execute", { body: args }), "Bridge executed! Tokens arrive in 1-5 minutes."); }
+    catch (e: any) { return err(e); }
+  }
+);
+
+// ============================================
+// DEFI (Swap)
+// ============================================
+
+server.tool(
+  "rift_swap",
+  `Swap one token for another on a single chain via the user's smart wallet. SAME-CHAIN ONLY — for cross-chain use rift_bridge_execute. REAL TX — confirm with user. No OTP required.
+
+Use 'flow: gasless' (recommended) for sponsored gas via UserOperation; use 'normal' to pay gas yourself. For known tokens (USDC, USDT, WETH, etc.) the chain's defaults are used; pass token_to_sell_address / token_to_buy_address only for arbitrary ERC-20s. For native ETH legs set isEth (selling ETH) or isBuyingEth (buying ETH).
+
+'value' is the amount of token_to_sell, in human units (e.g. '10' for 10 USDC). To target a specific output, pass amountOut instead.
+
+Requires login.`,
+  {
+    chain: z.string().describe("Chain to swap on: BASE, POLYGON, ARBITRUM, ETHEREUM, OPTIMISM, etc"),
+    flow: z.enum(["gasless", "normal"]).default("gasless").describe("gasless = no gas fee for user (recommended). normal = user pays gas in native token."),
+    token_to_sell: z.string().describe("Token symbol you're selling: USDC, USDT, WETH, etc."),
+    token_to_buy: z.string().describe("Token symbol you're buying: WETH, USDC, etc."),
+    value: z.string().describe("Amount of token_to_sell in human units (e.g. '10' for 10 USDC)"),
+    token_to_sell_address: z.string().optional().describe("ERC-20 contract address — only needed for arbitrary tokens not in the SDK's known list"),
+    token_to_buy_address: z.string().optional().describe("ERC-20 contract address — only needed for arbitrary tokens not in the SDK's known list"),
+    amountOut: z.string().optional().describe("Optional: target output amount (exact-out swap). Don't combine with normal value-based usage unless you know the upstream supports it."),
+    isEth: z.boolean().optional().describe("True if selling native ETH (not WETH)"),
+    isBuyingEth: z.boolean().optional().describe("True if buying native ETH (not WETH)"),
+  },
+  async (args) => {
+    const authErr = requireAuth();
+    if (authErr) return ok(authErr);
+    try { return json(await client.request("POST", "/api/v1/defi/swap", { body: args }), "Swap submitted!"); }
     catch (e: any) { return err(e); }
   }
 );

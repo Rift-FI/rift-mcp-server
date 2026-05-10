@@ -1,5 +1,10 @@
 // HTTP client for calling the Rift API Wrapper
 
+// Slightly above the wrapper's 130s server timeout so we get the wrapper's
+// own timeout response instead of aborting first. Long-running ramp ops
+// (mobile-money STK push) drive this — quick reads finish well under it.
+const DEFAULT_TIMEOUT_MS = 135_000;
+
 export class RiftApiClient {
   private baseUrl: string;
   private apiKey: string;
@@ -69,12 +74,29 @@ export class RiftApiClient {
       headers["Authorization"] = `Bearer ${this.bearerToken}`;
     }
 
-    const fetchOpts: RequestInit = { method, headers };
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), DEFAULT_TIMEOUT_MS);
+
+    const fetchOpts: RequestInit = { method, headers, signal: controller.signal };
     if (options?.body && (method === "POST" || method === "PUT" || method === "DELETE")) {
       fetchOpts.body = JSON.stringify(options.body);
     }
 
-    const response = await fetch(url.toString(), fetchOpts);
+    let response: Response;
+    try {
+      response = await fetch(url.toString(), fetchOpts);
+    } catch (e: any) {
+      if (e?.name === "AbortError") {
+        throw new Error(
+          `Request timed out after ${DEFAULT_TIMEOUT_MS / 1000}s. ` +
+            `The wrapper or upstream API may be hung. For ramp operations ` +
+            `that may have already submitted, check status before retrying.`
+        );
+      }
+      throw e;
+    } finally {
+      clearTimeout(timeoutId);
+    }
 
     const contentType = response.headers.get("content-type") || "";
     if (!contentType.includes("application/json")) {

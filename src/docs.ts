@@ -32,6 +32,8 @@ export const SDK_SERVICES: ServiceDoc[] = [
     methods: [
       { name: "signup", description: "Create a new user account", signature: "signup(request: SignupRequest): Promise<SignupResponse>", example: `await rift.auth.signup({ externalId: 'user_123', password: 'pass', email: 'user@example.com', displayName: 'John' });`, auth: "none" },
       { name: "login", description: "Authenticate and get access token. Supports email+OTP, phone+OTP, or externalId+password", signature: "login(request: LoginRequest): Promise<LoginResponse>", example: `const { accessToken } = await rift.auth.login({ email: 'user@example.com', otpCode: '123456' });\nrift.setBearerToken(accessToken);`, auth: "none" },
+      { name: "loginWithGoogle", description: "Sign in (or sign up on first use) with a Google ID token. Frontend obtains the idToken from Google One-Tap or `useGoogleLogin({ flow: 'implicit' })`. Backend verifies it with Google. Once an account is bound to Google, password/OTP login is rejected for that account.", signature: "loginWithGoogle(request: GoogleLoginRequest): Promise<GoogleLoginResponse>", example: `const { accessToken, address } = await rift.auth.loginWithGoogle({ idToken: googleIdToken, referrer: 'optional_referral_code' });`, auth: "none" },
+      { name: "loginWithApple", description: "Sign in (or sign up on first use) with an Apple identity token. Frontend obtains the idToken from `AppleID.auth.signIn()` (web) or `ASAuthorizationAppleIDProvider` (iOS). Apple only delivers email/name on the FIRST sign-in — pass displayName then. Apple-bound accounts are NOT locked to Apple (email/OTP login still works).", signature: "loginWithApple(request: AppleLoginRequest): Promise<AppleLoginResponse>", example: `const { accessToken, address } = await rift.auth.loginWithApple({ idToken: appleIdToken, displayName: 'Jane Doe' });`, auth: "none" },
       { name: "sendOtp", description: "Send OTP via SMS or email", signature: "sendOtp(request: OtpRequest): Promise<OtpResponse>", example: `await rift.auth.sendOtp({ email: 'user@example.com' });`, auth: "none" },
       { name: "verifyOtp", description: "Verify an OTP code", signature: "verifyOtp(request: OtpVerifyRequest): Promise<OtpResponse>", example: `await rift.auth.verifyOtp({ email: 'user@example.com', code: '123456' });`, auth: "none" },
       { name: "getUser", description: "Get authenticated user profile (includes autoSwapEnabled, autoSwapTargetChain)", signature: "getUser(): Promise<UserResponse>", example: `const { user } = await rift.auth.getUser();`, auth: "jwt" },
@@ -84,6 +86,14 @@ export const SDK_SERVICES: ServiceDoc[] = [
       { name: "buy", description: "Buy crypto via mobile money", signature: "buy(request: BuyRequest): Promise<BuyResponse>", example: `const purchase = await rift.onrampV2.buy({\n  shortcode: 'MPESA_KE', amount: 1000, chain: 'BASE', asset: 'USDC',\n  mobile_network: 'Safaricom', country_code: 'KE'\n});`, auth: "jwt" },
       { name: "getOnrampStatus", description: "Get onramp purchase status", signature: "getOnrampStatus(request): Promise<OnrampStatusResponse>", example: `const status = await rift.onrampV2.getOnrampStatus({ transactionCode: 'tx_abc' });`, auth: "jwt" },
       { name: "getOnrampOrders", description: "Get onramp order history", signature: "getOnrampOrders(): Promise<any>", example: `const orders = await rift.onrampV2.getOnrampOrders();`, auth: "jwt" },
+    ],
+  },
+  {
+    name: "DeFi",
+    sdkAccessor: "rift.defi",
+    description: "On-chain token swaps via the user's smart wallet",
+    methods: [
+      { name: "swap", description: "Swap one token for another on a single chain. Supports gasless (sponsored gas via UserOperation) and normal flows. Use token symbol fields for known tokens, or pass token_to_sell_address / token_to_buy_address for arbitrary ERC-20s. For native ETH wraps/unwraps set isEth or isBuyingEth.", signature: "swap(request: SwapRequest): Promise<SwapResponse>", example: `await rift.defi.swap({\n  chain: 'BASE', flow: 'gasless',\n  token_to_sell: 'USDC', token_to_buy: 'WETH',\n  value: '10' // 10 USDC\n});`, auth: "jwt" },
     ],
   },
   {
@@ -192,6 +202,8 @@ export const API_ENDPOINTS: Record<string, Endpoint[]> = {
   auth: [
     { method: "POST", path: "/api/v1/auth/signup", auth: "api_key", description: "Create user account", requestBody: { externalId: "string", password: "string", email: "string?", displayName: "string" } },
     { method: "POST", path: "/api/v1/auth/login", auth: "api_key", description: "Login and get access token", requestBody: { "email|phoneNumber|externalId": "string", "otpCode|password": "string" } },
+    { method: "POST", path: "/api/v1/auth/google", auth: "api_key", description: "Sign in (or sign up) with a Google ID token. Frontend gets idToken from Google's identity flow.", requestBody: { idToken: "string (Google ID token)", referrer: "string?" } },
+    { method: "POST", path: "/api/v1/auth/apple", auth: "api_key", description: "Sign in (or sign up) with an Apple identity token. Pass displayName on first sign-in (Apple won't send it again).", requestBody: { idToken: "string (Apple identity token)", displayName: "string?", referrer: "string?" } },
     { method: "PUT", path: "/api/v1/auth/user/update", auth: "jwt", description: "Update user profile (including autoSwapEnabled, autoSwapTargetChain)", requestBody: { displayName: "string?", email: "string?", autoSwapEnabled: "boolean?", autoSwapTargetChain: "BASE|ARBITRUM|POLYGON|ETHEREUM?" } },
     { method: "GET", path: "/api/v1/auth/user/me", auth: "jwt", description: "Get current user profile" },
     { method: "DELETE", path: "/api/v1/auth/user/delete", auth: "jwt", description: "Delete user account" },
@@ -219,6 +231,9 @@ export const API_ENDPOINTS: Record<string, Endpoint[]> = {
     { method: "POST", path: "/api/v1/onramp/", auth: "jwt", description: "Buy crypto with mobile money", requestBody: { shortcode: "string", amount: "number", chain: "BASE|POLYGON", asset: "USDC", mobile_network: "string", country_code: "string" } },
     { method: "POST", path: "/api/v1/onramp/status", auth: "jwt", description: "Get onramp status", requestBody: { transactionCode: "string" } },
     { method: "GET", path: "/api/v1/onramp/orders/:userId", auth: "jwt", description: "Get onramp orders" },
+  ],
+  defi: [
+    { method: "POST", path: "/api/v1/defi/swap", auth: "jwt", description: "On-chain token swap on a single chain", requestBody: { chain: "BASE|POLYGON|ARBITRUM|...", flow: "gasless|normal", token_to_sell: "USDC|USDT|...", token_to_buy: "WETH|USDC|...", value: "string (amount of token_to_sell)", token_to_sell_address: "string? (for arbitrary ERC-20)", token_to_buy_address: "string?", amountOut: "string?", isEth: "boolean?", isBuyingEth: "boolean?" } },
   ],
   bridge: [
     { method: "GET", path: "/api/v1/bridge/routes", auth: "api_key", description: "Get available bridge routes" },
@@ -256,7 +271,7 @@ export const API_ENDPOINTS: Record<string, Endpoint[]> = {
   signer: [
     { method: "POST", path: "/api/v1/signer/get-wallet-instance", auth: "jwt", description: "Get wallet instance", requestBody: { chain: "string" } },
     { method: "POST", path: "/api/v1/signer/sign-transaction", auth: "jwt", description: "Sign transaction", requestBody: { chain: "string", transactionData: "{ to, value, data, ... }" } },
-    { method: "POST", path: "/api/v1/signer/send-transaction", auth: "jwt", description: "Send transaction", requestBody: { chain: "string", transactionData: "{ to, value, data, ... }" } },
+    { method: "POST", path: "/api/v1/signer/send-transaction", auth: "jwt", description: "Execute call via user's smart wallet as ERC-4337 UserOp. Returns userOperationHash (NOT a classic tx hash).", requestBody: { chain: "string", transactionData: "{ to: string (REQUIRED), value?: string, data?: string }", paymasterToken: "string? (ERC-20 contract to pay gas in a token; omit for sponsored gas)" } },
     { method: "POST", path: "/api/v1/signer/sign-message", auth: "jwt", description: "Sign message", requestBody: { chain: "string", message: "string" } },
   ],
   assets: [
