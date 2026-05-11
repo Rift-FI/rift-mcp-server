@@ -269,11 +269,121 @@ For project admins to manage users:
 2. Call rift_get_suspended_users to list all suspended users
 3. Call rift_get_user_status to check a specific user
 4. Call rift_unsuspend_user to restore access`,
+
+      widget: `## Embed the Rift sign-in widget on a website
+
+Rift ships a hosted sign-in widget at https://widget.riftfi.xyz that
+any frontend can embed. Users sign in with Google / email / phone,
+get a self-custodial wallet provisioned on first use, and you get
+back a short-lived access JWT to call Rift's API on their behalf.
+
+### Vanilla HTML / any framework (recommended for first integration)
+
+\`\`\`html
+<script
+  src="https://widget.riftfi.xyz/embed.js"
+  data-project-key="sk_YOUR_PROJECT_API_KEY"
+  async
+></script>
+<button data-rift-trigger>Sign in</button>
+<script>
+  Rift.on("signin-success", (user) => {
+    // user.user, user.address, user.btcAddress, user.accessToken
+    console.log(user);
+  });
+</script>
+\`\`\`
+
+The loader installs \`window.Rift.{open, close, on, off}\`. Any element
+with \`data-rift-trigger\` opens the modal automatically.
+
+### React
+
+\`\`\`bash
+npm install @rift-finance/react
+\`\`\`
+
+\`\`\`tsx
+import { RiftProvider, RiftAuth, useRift } from "@rift-finance/react";
+
+<RiftProvider apiKey="sk_...">
+  <RiftAuth onSuccess={user => console.log(user)} />
+  <App />
+</RiftProvider>
+
+// Anywhere inside:
+const { isAuthenticated, open, signOut, getAccessToken } = useRift();
+\`\`\`
+
+\`getAccessToken()\` returns a valid JWT, silently refreshing it via a
+hidden iframe if the current one is near expiry.
+
+### Configuring Google sign-in
+
+1. Create an OAuth 2.0 Client ID in Google Cloud Console for the
+   project's domain.
+2. Paste it into the project's "Auth" tab in the Rift dashboard.
+3. The widget refetches its config on next load and shows the
+   Google button automatically.
+
+### Where to read more
+- Full docs: https://service.riftfi.xyz/docs (no login required)
+- npm: https://www.npmjs.com/package/@rift-finance/react
+- Source: https://github.com/Rift-FI/rift-react
+- This MCP tool: call rift_widget_snippet for a ready-to-paste code
+  block, or rift_get_widget_config to inspect a project's widget
+  configuration (branding, registered Google client IDs, etc.).`,
+
+      signtx: `## Signing transactions for widget-authenticated users
+
+Rift wallets sign server-side under the user's authenticated session,
+so a user who signed in via the widget can move funds with one HTTP
+call. The widget gives you a bearer token; you pass it to
+\`POST /transactions/send\` along with the action you want.
+
+### Example
+
+\`\`\`js
+Rift.on("signin-success", async (user) => {
+  const res = await fetch(
+    "https://developers.riftfi.xyz/transactions/send",
+    {
+      method: "POST",
+      headers: {
+        "X-API-Key": "sk_YOUR_PROJECT_API_KEY",
+        "Authorization": \`Bearer \${user.accessToken}\`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        to: "0xRecipient...",
+        value: "10",
+        token: "USDC",
+        chain: "polygon",
+      }),
+    }
+  );
+  console.log(await res.json());  // { hash: "0x..." }
+});
+\`\`\`
+
+### Step-up OTP per transaction
+
+For projects holding meaningful balances, toggle "require OTP on
+transactions" in the project's Auth tab. The flow becomes:
+1. Call \`POST /otp/send\` to send a code to the user's email/phone.
+2. Forward the code to \`/transactions/send\` in the \`otpCode\` field.
+
+### Beyond send
+The same widget-issued accessToken authenticates every Rift endpoint:
+/wallet/*, /offramp/*, /onramp/*, /bridge/*, /swap/*, /walletconnect/*.
+See rift_get_api_endpoints for the full surface.`,
     };
 
     // Match the task to a flow. Order matters — more specific keywords first.
     let matched: string | undefined;
-    if (t.includes("google")) matched = flows.google;
+    if (t.includes("widget") || t.includes("embed") || t.includes("client-side") || t.includes("client side") || t.includes("frontend") || t.includes("react sdk") || t.includes("npm package") || (t.includes("rift") && (t.includes("integrate") || t.includes("install")))) matched = flows.widget;
+    else if (t.includes("sign tx") || t.includes("sign transaction") || t.includes("widget user") || (t.includes("sign") && t.includes("widget")) || (t.includes("send") && t.includes("widget"))) matched = flows.signtx;
+    else if (t.includes("google")) matched = flows.google;
     else if (t.includes("apple")) matched = flows.apple;
     else if (t.includes("auto-swap") || t.includes("autoswap") || t.includes("auto swap") || t.includes("consolidate")) matched = flows.autoswap;
     else if (t.includes("send") || t.includes("transfer") || t.includes("pay someone")) matched = flows.send;
@@ -314,6 +424,7 @@ I can help with any of these. Tell me what you need:
 - **Account recovery** — reset password via recovery methods
 - **Sign transactions** — sign or send raw blockchain transactions
 - **User management** — suspend/unsuspend users (admin)
+- **Embed the widget** — add Rift sign-in to a website / React app (vanilla embed.js or @rift-finance/react)
 
 Current status:
 - API Key: ${client.hasApiKey() ? "set" : "NOT SET — need to call rift_set_api_key"}
@@ -370,6 +481,219 @@ server.tool(
     const chains = SUPPORTED_CHAINS.map(c => `${c.name} (ID:${c.id}) — ${c.native}, ${c.stablecoins.join("/")}`).join("\n");
     const currencies = SUPPORTED_CURRENCIES.map(c => `${c.code} (${c.country}) — ${c.methods.join(", ")}`).join("\n");
     return ok(`Chains:\n${chains}\n\nFiat:\n${currencies}\n\nChainName values: ARBITRUM, BASE, OPTIMISM, ETHEREUM, LISK, BNB, POLYGON, BERACHAIN, CELO\nTokenSymbol values: USDC, USDT, ETH, BTC, WBERA, LSK, BNB, MATIC, SAIL, cUSD`);
+  }
+);
+
+// ============================================
+// CLIENT-SIDE INTEGRATION HELPERS
+// ============================================
+
+server.tool(
+  "rift_widget_snippet",
+  "Return a ready-to-paste embed snippet for the Rift sign-in widget. Use this when a developer asks 'how do I add Rift to my site/app'. The output is a fully runnable code block keyed by their framework (html/react/nextjs). Each snippet uses the project's actual API key.",
+  {
+    framework: z
+      .enum(["html", "react", "nextjs"])
+      .default("html")
+      .describe("Where the widget will be embedded. 'html' for vanilla / any non-React framework; 'react' for a Vite/CRA React app; 'nextjs' for App Router."),
+    mode: z
+      .enum(["signin", "signup"])
+      .default("signin")
+      .describe("Initial mode the modal opens in. Users can still toggle between sign-in and sign-up inside the modal."),
+    apiKey: z
+      .string()
+      .optional()
+      .describe("Override the currently-set project API key. Defaults to whichever key was set via rift_set_api_key."),
+  },
+  async ({ framework, mode, apiKey }) => {
+    const key = apiKey || (client.hasApiKey() ? "sk_YOUR_PROJECT_API_KEY" : "sk_YOUR_PROJECT_API_KEY");
+
+    if (framework === "html") {
+      return ok(`## Vanilla HTML embed
+
+Drop these two snippets onto any HTML page.
+
+\`\`\`html
+<script
+  src="https://widget.riftfi.xyz/embed.js"
+  data-project-key="${key}"
+  async
+></script>
+
+<button data-rift-trigger${mode === "signup" ? ' data-rift-mode="signup"' : ""}>
+  ${mode === "signup" ? "Create account" : "Sign in"}
+</button>
+
+<script>
+  window.addEventListener("load", () => {
+    Rift.on("signin-success", (user) => {
+      // user = { user, address, btcAddress, accessToken }
+      console.log("✓ signed in:", user.user, user.address);
+    });
+    Rift.on("signin-error", (e) => console.error(e.message));
+  });
+</script>
+\`\`\`
+
+The loader installs \`window.Rift.{open, close, on, off}\`. Any element
+with \`data-rift-trigger\` opens the modal automatically.
+
+Next: call rift_get_widget_config to verify branding + Google sign-in
+are configured for this project.`);
+    }
+
+    if (framework === "react") {
+      return ok(`## React (Vite / CRA)
+
+\`\`\`bash
+npm install @rift-finance/react
+\`\`\`
+
+\`\`\`tsx
+// App.tsx
+import { RiftProvider, RiftAuth } from "@rift-finance/react";
+
+export default function App() {
+  return (
+    <RiftProvider apiKey="${key}">
+      <RiftAuth
+        onSuccess={(user) => console.log("signed in:", user)}
+        onError={(msg) => console.error(msg)}
+      />
+      <YourApp />
+    </RiftProvider>
+  );
+}
+\`\`\`
+
+\`\`\`tsx
+// Anywhere inside <RiftProvider>:
+import { useRift } from "@rift-finance/react";
+
+export function SignInButton() {
+  const { isAuthenticated, user, open, signOut } = useRift();
+  return isAuthenticated ? (
+    <button onClick={signOut}>Sign out</button>
+  ) : (
+    <button onClick={() => open({ mode: "${mode}" })}>${
+      mode === "signup" ? "Create account" : "Sign in"
+    }</button>
+  );
+}
+\`\`\`
+
+For authenticated API calls use \`getAccessToken()\` so a near-expiry
+token gets refreshed silently via a hidden iframe before the request.`);
+    }
+
+    // nextjs
+    return ok(`## Next.js (App Router)
+
+\`\`\`bash
+npm install @rift-finance/react
+\`\`\`
+
+\`\`\`tsx
+// app/providers.tsx
+"use client";
+import { RiftProvider, RiftAuth } from "@rift-finance/react";
+
+export function Providers({ children }: { children: React.ReactNode }) {
+  return (
+    <RiftProvider apiKey={process.env.NEXT_PUBLIC_RIFT_API_KEY!}>
+      <RiftAuth onSuccess={(user) => console.log("signed in:", user)} />
+      {children}
+    </RiftProvider>
+  );
+}
+\`\`\`
+
+\`\`\`tsx
+// app/layout.tsx
+import { Providers } from "./providers";
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body><Providers>{children}</Providers></body>
+    </html>
+  );
+}
+\`\`\`
+
+\`\`\`tsx
+// any client component:
+"use client";
+import { useRift } from "@rift-finance/react";
+
+export function Nav() {
+  const { isAuthenticated, open, signOut } = useRift();
+  return isAuthenticated ? (
+    <button onClick={signOut}>Sign out</button>
+  ) : (
+    <button onClick={() => open({ mode: "${mode}" })}>${
+      mode === "signup" ? "Create account" : "Sign in"
+    }</button>
+  );
+}
+\`\`\`
+
+\`\`\`bash
+# .env.local
+NEXT_PUBLIC_RIFT_API_KEY=${key}
+\`\`\`
+
+The provider/auth components are client-only (they own iframe + window
+listeners). Keep them inside a "use client" boundary.`);
+  }
+);
+
+server.tool(
+  "rift_get_widget_config",
+  "Fetch the widget configuration for the currently-set project: display name, branding (colors / logo / font), registered Google Client IDs, and allowed origins. Useful for diagnosing why the widget shows defaults instead of project branding, or why Google sign-in isn't appearing. Requires rift_set_api_key first.",
+  {},
+  async () => {
+    if (!client.hasApiKey()) {
+      return ok("No API key set. Call rift_set_api_key first.");
+    }
+    // /project/widget-config is exposed on the main backend (not the
+    // wrapper RiftApiClient hits), so use a direct fetch here.
+    const backendUrl =
+      process.env.RIFT_BACKEND_URL || "https://service.riftfi.xyz";
+    try {
+      const res = await fetch(`${backendUrl}/project/widget-config`, {
+        method: "GET",
+        headers: {
+          "X-API-Key": client.getApiKey(),
+          "Content-Type": "application/json",
+        },
+      });
+      const data: any = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data?.error || data?.message || `HTTP ${res.status}`);
+      }
+      return json(data, "Widget config for the current project:");
+    } catch (e: any) {
+      return err(e);
+    }
+  }
+);
+
+server.tool(
+  "rift_docs_url",
+  "Return the URL of the public Rift docs portal. Use this to point a developer at integration walkthroughs (client-side, server SDK, HTTP API, transaction signing) without requiring them to log in to the dashboard.",
+  {},
+  async () => {
+    return ok(`Rift integration docs (public, no login required):
+
+- Overview & quick start:  https://service.riftfi.xyz/docs
+- Client-side integration: https://service.riftfi.xyz/docs/client-side
+- Server-side SDK:         https://service.riftfi.xyz/docs/server-sdk
+- HTTP API:                https://service.riftfi.xyz/docs/http-api
+- Signing transactions:    https://service.riftfi.xyz/docs/tx-signing
+
+Live API explorer (OpenAPI): https://developers.riftfi.xyz
+npm package: https://www.npmjs.com/package/@rift-finance/react`);
   }
 );
 
