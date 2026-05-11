@@ -318,13 +318,12 @@ const { isAuthenticated, open, signOut, getAccessToken } = useRift();
 \`getAccessToken()\` returns a valid JWT, silently refreshing it via a
 hidden iframe if the current one is near expiry.
 
-### Configuring Google sign-in
+### Auth methods
 
-1. Create an OAuth 2.0 Client ID in Google Cloud Console for the
-   project's domain.
-2. Paste it into the project's "Auth" tab in the Rift dashboard.
-3. The widget refetches its config on next load and shows the
-   Google button automatically.
+Google, Apple, email OTP, and phone OTP all surface automatically in
+the widget — zero merchant setup. Rift handles OAuth credentials and
+code delivery under the hood; the widget renders every available
+method based on what's enabled on the Rift backend.
 
 ### Where to read more
 - Full docs: https://service.riftfi.xyz/docs (no login required)
@@ -332,7 +331,7 @@ hidden iframe if the current one is near expiry.
 - Source: https://github.com/Rift-FI/rift-react
 - This MCP tool: call rift_widget_snippet for a ready-to-paste code
   block, or rift_get_widget_config to inspect a project's widget
-  configuration (branding, registered Google client IDs, etc.).`,
+  configuration (branding, allowed origins, etc.).`,
 
       signtx: `## Signing transactions for widget-authenticated users
 
@@ -366,12 +365,12 @@ Rift.on("signin-success", async (user) => {
 });
 \`\`\`
 
-### Step-up OTP per transaction
+### Transaction OTP is mandatory
 
-For projects holding meaningful balances, toggle "require OTP on
-transactions" in the project's Auth tab. The flow becomes:
+Every spend is gated by a fresh OTP (or password for externalId
+users). The flow:
 1. Call \`POST /otp/send\` to send a code to the user's email/phone.
-2. Forward the code to \`/transactions/send\` in the \`otpCode\` field.
+2. Forward the code to \`/transaction/spend\` in the \`otpCode\` field.
 
 ### Beyond send
 The same widget-issued accessToken authenticates every Rift endpoint:
@@ -650,7 +649,7 @@ listeners). Keep them inside a "use client" boundary.`);
 
 server.tool(
   "rift_get_widget_config",
-  "Fetch the widget configuration for the currently-set project: display name, branding (colors / logo / font), registered Google Client IDs, and allowed origins. Useful for diagnosing why the widget shows defaults instead of project branding, or why Google sign-in isn't appearing. Requires rift_set_api_key first.",
+  "Fetch the widget configuration for the currently-set project: display name, branding (colors / logo / font), and allowed origins. Useful for diagnosing why the widget shows defaults instead of project branding. Requires rift_set_api_key first.",
   {},
   async () => {
     if (!client.hasApiKey()) {
