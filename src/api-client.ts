@@ -110,7 +110,16 @@ export class RiftApiClient {
     const data: any = await response.json();
 
     if (!response.ok) {
-      throw new Error(data.error || data.message || `HTTP ${response.status}`);
+      let message = data.error || data.message || `HTTP ${response.status}`;
+      // Upstream 500s are now `{ message, requestId }` with no internal
+      // detail; keep the id so failures can be traced.
+      if (typeof data.requestId === "string" && !String(message).includes(data.requestId)) {
+        message = `${message} (requestId: ${data.requestId})`;
+      }
+      const error: Error & { status?: number; requiresOTP?: boolean } = new Error(message);
+      error.status = response.status;
+      if (data.requiresOTP === true) error.requiresOTP = true;
+      throw error;
     }
 
     return data as T;

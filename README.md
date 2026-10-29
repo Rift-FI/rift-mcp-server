@@ -176,13 +176,13 @@ AI: [calls rift_send_crypto] → Done! Tx hash: 0xdef...
 ### Auth & User (12)
 | Tool | Description |
 |------|-------------|
-| `rift_signup` | Create account |
+| `rift_signup` | Create account. Email/phone: call `rift_send_otp` first and pass `otpCode`, then `rift_login` with the SAME code. externalId + password needs no OTP |
 | `rift_send_otp` | Send OTP |
 | `rift_verify_otp` | Verify OTP |
 | `rift_login` | Login (stores session) |
 | `rift_logout` | Logout |
 | `rift_get_user` | Get profile |
-| `rift_update_user` | Update profile / auto-swap config |
+| `rift_update_user` | Update profile / auto-swap config. Changing email/phone needs an OTP for the NEW value (`otpCode`, or `emailOtpCode` + `phoneOtpCode` when changing both) |
 | `rift_delete_user` | Delete account |
 | `rift_create_recovery` | Setup recovery methods |
 | `rift_get_recovery_options` | Get recovery options |
@@ -271,12 +271,14 @@ AI: [calls rift_send_crypto] → Done! Tx hash: 0xdef...
 | `rift_get_chains` | List chains |
 
 ### User Management (4)
+Project-owner only. These tools use the logged-in session: log in (`rift_send_otp` + `rift_login`) as the account that owns the project before calling them. `projectOwnerEmail` / `projectOwnerPhone` are no longer accepted.
+
 | Tool | Description |
 |------|-------------|
 | `rift_suspend_user` | Suspend user |
 | `rift_unsuspend_user` | Unsuspend user |
 | `rift_get_suspended_users` | List suspended |
-| `rift_get_user_status` | Check suspension status |
+| `rift_get_user_status` | Look up a user / check suspension status |
 
 ### Deposits (1)
 | Tool | Description |

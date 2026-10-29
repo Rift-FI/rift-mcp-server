@@ -2,6 +2,10 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
+import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
+import * as http from "node:http";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SDK_SERVICES, API_ENDPOINTS, SUPPORTED_CHAINS, SUPPORTED_CURRENCIES } from "./docs";
 import { RiftApiClient } from "./api-client";
@@ -13,7 +17,7 @@ const client = new RiftApiClient(
 
 const server = new McpServer({
   name: "rift-finance",
-  version: "1.0.0",
+  version: "2.0.0",
 });
 
 // ── Helpers ──────────────────────────────────────────────
@@ -24,16 +28,23 @@ function ok(text: string) {
 
 function err(e: any) {
   const msg = e.message || String(e);
+  const status: number | undefined = typeof e?.status === "number" ? e.status : undefined;
 
   // Add recovery hints based on common errors
   let hint = "";
-  if (msg.includes("No API key")) hint = "\n\nNext step: ask the user for their Rift API key and call rift_set_api_key.";
+  if (status === 429 || msg.includes("Too many failed verification attempts") || msg.includes("Too many requests")) hint = "\n\nNext step: rate limited or OTP locked out after too many wrong codes. Wait a few minutes before calling rift_send_otp again; do NOT keep retrying.";
+  else if (msg.includes("parent-proxy overloaded") || (status === 503 && !msg.includes("<"))) hint = "\n\nNext step: the signing service is overloaded. Wait a little before trying again. Do NOT automatically retry sends, payments, or withdrawals: first check history/status to make sure the original did not go through.";
+  else if (msg.includes("invalid credentials")) hint = "\n\nNext step: the wallet rejected the credentials for this signing request (wrong password, or an OTP/proof that is wrong or expired). For email/phone users call rift_send_otp for a fresh code; for externalId users ask for the password again.";
+  else if (msg.includes("project owner") || msg.includes("Only the project owner")) hint = "\n\nNext step: this is a project-owner operation. Log in (rift_send_otp + rift_login) as the account that OWNS this project (the dashboard owner's email/phone), then retry.";
+  else if (msg.includes("otpCode is required") || e?.requiresOTP) hint = "\n\nNext step: this server requires an OTP for email/phone sign-up. Call rift_send_otp for that email/phone, ask the user for the code, then call rift_signup again with otpCode.";
+  else if (msg.includes("No API key")) hint = "\n\nNext step: ask the user for their Rift API key and call rift_set_api_key.";
   else if (msg.includes("Unauthorized") || msg.includes("Bearer token")) hint = "\n\nNext step: user needs to login first. Call rift_send_otp then rift_login.";
   else if (msg.includes("OTP") || msg.includes("Password is required")) hint = "\n\nNext step: this operation requires OTP or password verification. For email/phone users, call rift_send_otp first, then retry with the otpCode. For externalId users, ask for their password.";
   else if (msg.includes("KYC") || msg.includes("kyc")) hint = "\n\nNext step: user needs KYC verification. Call rift_kyc_get_token to start KYC flow.";
   else if (msg.includes("Merchant") || msg.includes("merchant") || msg.includes("KYB")) hint = "\n\nNext step: user's account needs merchant approval (KYB verification). This is done by the project admin.";
   else if (msg.includes("Insufficient") || msg.includes("balance")) hint = "\n\nNext step: user doesn't have enough funds. Call rift_get_balance to check their current balance.";
   else if (msg.includes("Server error") || msg.includes("502") || msg.includes("503")) hint = "\n\nNext step: the API server may be temporarily down. Wait a moment and retry.";
+  else if (msg.includes("requestId")) hint = "\n\nNext step: the server hit an internal error. Quote the requestId if the user contacts Rift support. Don't retry money-moving operations without checking their status first.";
 
   return { content: [{ type: "text" as const, text: `Error: ${msg}${hint}` }] };
 }
@@ -41,6 +52,15 @@ function err(e: any) {
 function json(data: any, prefix?: string) {
   const text = prefix ? `${prefix}\n${JSON.stringify(data, null, 2)}` : JSON.stringify(data, null, 2);
   return ok(text);
+}
+
+// User-management tools are authorised by the logged-in PROJECT OWNER's
+// token (backend requireProjectAdmin). projectOwnerEmail/Phone are no
+// longer accepted, so there is nothing to send without a session.
+function requireOwnerAuth(): string | null {
+  if (!client.hasApiKey()) return "No API key set. Ask the user for their Rift API key (starts with sk_) and call rift_set_api_key first.";
+  if (!client.isAuthenticated()) return "User management needs the PROJECT OWNER to be logged in. Ask the user to log in as the account that owns this project: call rift_send_otp with the owner's email/phone, then rift_login with the code. Then retry.";
+  return null;
 }
 
 // Check auth state and return helpful message
@@ -237,9 +257,18 @@ Only USDC and USDT are auto-swapped. Other tokens stay on the receiving chain.`,
 
       signup: `## Create Account Flow
 1. Call rift_set_api_key if not already set
-2. Call rift_signup with externalId, password, email (optional), displayName
-3. Account created — smart wallets deployed on all chains
-4. Then login with rift_send_otp + rift_login (or externalId + password via rift_login)`,
+
+Email or phone account (OTP):
+2. Call rift_send_otp with the email (or phone) being registered
+3. Ask the user for the code they received
+4. Call rift_signup with email (or phoneNumber), displayName and otpCode
+5. Call rift_login with the same email/phoneNumber and the SAME otpCode (signup leaves a 10-minute one-time proof, so no new code is needed)
+
+externalId + password account (no OTP):
+2. Call rift_signup with externalId, password, displayName (email/phone optional)
+3. Call rift_login with externalId + password
+
+Account created: smart wallets are deployed on all chains.`,
 
       recovery: `## Account Recovery Flow
 1. Call rift_get_recovery_options with the user's externalId
@@ -263,7 +292,7 @@ IMPORTANT about rift_send_transaction:
 - Use rift_send_crypto for simple token transfers instead — it's higher-level and user-friendly.`,
 
       suspend: `## User Management Flow
-For project admins to manage users:
+For the PROJECT OWNER only. These tools use the logged-in session token: the user must be logged in (rift_send_otp + rift_login) as the account that owns the project (the API key's project). Other accounts get 401/403. projectOwnerEmail/projectOwnerPhone are no longer accepted as proof.
 
 1. Call rift_suspend_user with email/phone/externalId and reason
 2. Call rift_get_suspended_users to list all suspended users
@@ -324,6 +353,14 @@ Google, Apple, email OTP, and phone OTP all surface automatically in
 the widget — zero merchant setup. Rift handles OAuth credentials and
 code delivery under the hood; the widget renders every available
 method based on what's enabled on the Rift backend.
+
+### Register your site's origin (required for passkeys)
+
+The widget runs in an iframe. A passkey assertion made inside an
+iframe is only accepted when the EMBEDDING page's origin (e.g.
+https://www.yourshop.com) is listed in the project's allowed origins
+in the Rift dashboard. Add every origin that embeds the widget
+(production, staging, localhost for dev). No code change is needed.
 
 ### Where to read more
 - Full docs: https://service.riftfi.xyz/docs (no login required)
@@ -736,16 +773,27 @@ server.tool(
 
 server.tool(
   "rift_signup",
-  "Create a new Rift user account. After signup, the user needs to login separately via rift_login.",
+  "Create a new Rift user account. Two ways: (1) email or phone sign-up: FIRST call rift_send_otp for that email/phone, ask the user for the code, then call this with email (or phoneNumber) + displayName + otpCode. Afterwards call rift_login with the SAME otpCode (no new code needed). (2) externalId + password sign-up: no OTP needed. After signup the user still has to log in via rift_login.",
   {
-    externalId: z.string().describe("Unique user ID in your system"),
-    password: z.string().describe("User password"),
-    email: z.string().optional().describe("User email — enables email OTP login"),
-    phoneNumber: z.string().optional().describe("User phone — enables phone OTP login"),
+    externalId: z.string().optional().describe("Unique user ID in your system (externalId + password sign-up)"),
+    password: z.string().optional().describe("User password (required with externalId)"),
+    email: z.string().optional().describe("User email. For an email sign-up pair it with otpCode"),
+    phoneNumber: z.string().optional().describe("User phone with country code. For a phone sign-up pair it with otpCode"),
     displayName: z.string().describe("Display name"),
+    otpCode: z.string().optional().describe("OTP from rift_send_otp, sent to the email/phone being registered. Required for email/phone sign-up on servers that enforce it, and always accepted, so send it. Reuse the SAME code for rift_login right after."),
   },
   async (args) => {
-    try { return json(await client.request("POST", "/api/v1/auth/signup", { body: args }), "User created! Next: call rift_send_otp and rift_login to authenticate."); }
+    if (args.externalId && !args.password) return ok("externalId sign-up needs a password. Ask the user for one, or sign up with email/phone + otpCode instead.");
+    if (!args.externalId && !args.email && !args.phoneNumber) return ok("Provide an email or phoneNumber (with otpCode from rift_send_otp), or externalId + password.");
+    const body: any = {};
+    Object.entries(args).forEach(([k, v]) => { if (v !== undefined && v !== "") body[k] = v; });
+    const otpSignup = !args.externalId && !!args.otpCode;
+    const next = otpSignup
+      ? `User created! Next: call rift_login with ${args.email ? "email" : "phoneNumber"} and the SAME otpCode (no new OTP needed).`
+      : args.externalId
+        ? "User created! Next: call rift_login with externalId + password."
+        : "User created! Next: call rift_send_otp and rift_login to authenticate.";
+    try { return json(await client.request("POST", "/api/v1/auth/signup", { body }), next); }
     catch (e: any) { return err(e); }
   }
 );
@@ -864,11 +912,14 @@ server.tool(
 
 server.tool(
   "rift_update_user",
-  "Update user profile. Can change display name, email, notification email, and auto-swap settings. Requires login.",
+  "Update user profile. Can change display name, email, phone, notification email, and auto-swap settings. Requires login. Changing email or phone needs an OTP for the NEW value: call rift_send_otp with the new email/phone first, then pass otpCode (changing one of them) or emailOtpCode + phoneOtpCode (changing both). Other fields need no OTP.",
   {
     displayName: z.string().optional().describe("New display name"),
-    email: z.string().optional().describe("New email"),
-    phoneNumber: z.string().optional().describe("New phone"),
+    email: z.string().optional().describe("New email (needs otpCode sent to this new email)"),
+    phoneNumber: z.string().optional().describe("New phone (needs otpCode sent to this new phone)"),
+    otpCode: z.string().optional().describe("OTP sent to the NEW email or phone, when changing ONE of them"),
+    emailOtpCode: z.string().optional().describe("OTP sent to the NEW email, when changing email AND phone together"),
+    phoneOtpCode: z.string().optional().describe("OTP sent to the NEW phone, when changing email AND phone together"),
     notificationEmail: z.string().optional().describe("Email for notifications (separate from login email)"),
     autoSwapEnabled: z.boolean().optional().describe("Enable/disable auto-swap (auto-bridge incoming USDC/USDT to target chain)"),
     autoSwapTargetChain: z.string().optional().describe("Target chain for auto-swap: BASE, ARBITRUM, POLYGON, or ETHEREUM"),
@@ -1846,7 +1897,7 @@ server.tool(
 
 server.tool(
   "rift_suspend_user",
-  "Suspend a user from the platform. Admin operation. Requires API key.",
+  "Suspend a user from the platform. PROJECT OWNER only: uses the logged-in session, so the user must be logged in (rift_send_otp + rift_login) as the account that owns this project. Other accounts are rejected.",
   {
     email: z.string().optional().describe("User email"),
     phoneNumber: z.string().optional().describe("User phone"),
@@ -1855,6 +1906,8 @@ server.tool(
     reason: z.string().optional().describe("Reason for suspension"),
   },
   async (args) => {
+    const authErr = requireOwnerAuth();
+    if (authErr) return ok(authErr);
     try { return json(await client.request("POST", "/api/v1/users/suspend", { body: args }), "User suspended."); }
     catch (e: any) { return err(e); }
   }
@@ -1862,7 +1915,7 @@ server.tool(
 
 server.tool(
   "rift_unsuspend_user",
-  "Unsuspend a previously suspended user. Admin operation.",
+  "Unsuspend a previously suspended user. PROJECT OWNER only: uses the logged-in session, so the user must be logged in (rift_send_otp + rift_login) as the account that owns this project. Other accounts are rejected.",
   {
     email: z.string().optional(),
     phoneNumber: z.string().optional(),
@@ -1870,6 +1923,8 @@ server.tool(
     userId: z.string().optional(),
   },
   async (args) => {
+    const authErr = requireOwnerAuth();
+    if (authErr) return ok(authErr);
     try { return json(await client.request("POST", "/api/v1/users/unsuspend", { body: args }), "User unsuspended."); }
     catch (e: any) { return err(e); }
   }
@@ -1877,9 +1932,11 @@ server.tool(
 
 server.tool(
   "rift_get_suspended_users",
-  "List all suspended users. Admin operation.",
+  "List all suspended users in the project. PROJECT OWNER only: uses the logged-in session, so the user must be logged in (rift_send_otp + rift_login) as the account that owns this project. Other accounts are rejected.",
   {},
   async () => {
+    const authErr = requireOwnerAuth();
+    if (authErr) return ok(authErr);
     try { return json(await client.request("GET", "/api/v1/users/suspended")); }
     catch (e: any) { return err(e); }
   }
@@ -1887,7 +1944,7 @@ server.tool(
 
 server.tool(
   "rift_get_user_status",
-  "Check if a specific user is suspended. Admin operation.",
+  "Look up a user and check whether they are suspended. PROJECT OWNER only: uses the logged-in session, so the user must be logged in (rift_send_otp + rift_login) as the account that owns this project. Other accounts are rejected.",
   {
     email: z.string().optional(),
     phoneNumber: z.string().optional(),
@@ -1895,6 +1952,8 @@ server.tool(
     userId: z.string().optional(),
   },
   async (args) => {
+    const authErr = requireOwnerAuth();
+    if (authErr) return ok(authErr);
     try {
       const params: Record<string, string> = {};
       Object.entries(args).forEach(([k, v]) => { if (v) params[k] = v; });
@@ -1934,10 +1993,150 @@ server.tool(
 // ============================================
 // START
 // ============================================
+//
+// Two transport modes:
+//
+//   stdio (default) — for local Claude Desktop / Code / Cursor. The host
+//     spawns this binary as a subprocess and talks JSON-RPC over stdin/
+//     stdout. RIFT_API_KEY comes from the env block in the client's MCP
+//     config; `rift_set_api_key` can override it at runtime since it's
+//     a single-tenant subprocess.
+//
+//   http — for claude.ai connectors and any other remote MCP client.
+//     Bind on $PORT and accept POSTs on /mcp. Gated by a Bearer token
+//     (MCP_BEARER_TOKEN) so randoms on the internet can't spam the
+//     deployed instance. The RIFT_API_KEY is pulled from env at boot
+//     and IS shared across all callers in this mode — deploy one
+//     instance per Rift project, do not multi-tenant a single deploy.
+//
+// Toggle via MCP_TRANSPORT=http (or implied when PORT is set in the env
+// and no MCP_TRANSPORT is given).
 
-async function main() {
+async function startStdio() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
+  // Stay alive — the transport keeps the event loop hot via stdin.
 }
 
-main().catch(console.error);
+async function startHttp() {
+  const port = Number(process.env.PORT || 8800);
+  const expectedBearer = (process.env.MCP_BEARER_TOKEN || "").trim();
+
+  // sessionId → transport. Cleaned up on transport close.
+  const transports: Record<string, StreamableHTTPServerTransport> = {};
+
+  const httpServer = http.createServer(async (req, res) => {
+    try {
+      // /health stays open so PaaS health checks succeed without auth.
+      if (req.url === "/health") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end("ok");
+        return;
+      }
+      if (req.url === "/" || req.url === "") {
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(
+          "Rift Finance MCP server (HTTP mode).\nPOST /mcp — JSON-RPC over MCP streamable HTTP.\nGate: Authorization: Bearer <MCP_BEARER_TOKEN>.\n"
+        );
+        return;
+      }
+      if (!req.url || !req.url.startsWith("/mcp")) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: "not found" }));
+        return;
+      }
+
+      // Bearer auth on /mcp. Empty MCP_BEARER_TOKEN disables auth — use
+      // that only for private-VPC deploys.
+      if (expectedBearer) {
+        const got = req.headers["authorization"] || "";
+        if (got !== `Bearer ${expectedBearer}`) {
+          res.writeHead(401, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: "unauthorized" }));
+          return;
+        }
+      }
+
+      // Read the body so we can both inspect it (is this an initialize?)
+      // and hand it to the transport.
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const bodyText = Buffer.concat(chunks).toString("utf8");
+      const body = bodyText ? JSON.parse(bodyText) : undefined;
+
+      const sessionIdHeader = req.headers["mcp-session-id"];
+      const sessionId = Array.isArray(sessionIdHeader)
+        ? sessionIdHeader[0]
+        : sessionIdHeader;
+
+      let transport: StreamableHTTPServerTransport;
+      if (sessionId && transports[sessionId]) {
+        transport = transports[sessionId];
+      } else if (!sessionId && body && isInitializeRequest(body)) {
+        // New session — initialise transport, wire it to the MCP server,
+        // and remember it for future requests carrying mcp-session-id.
+        transport = new StreamableHTTPServerTransport({
+          sessionIdGenerator: () => randomUUID(),
+          onsessioninitialized: (id: string) => {
+            transports[id] = transport;
+          },
+          enableJsonResponse: true,
+        });
+        transport.onclose = () => {
+          if (transport.sessionId) delete transports[transport.sessionId];
+        };
+        await server.connect(transport);
+      } else {
+        res.writeHead(400, { "content-type": "application/json" });
+        res.end(
+          JSON.stringify({
+            error: sessionId
+              ? "unknown session id"
+              : "no session id and request is not an initialize",
+          })
+        );
+        return;
+      }
+
+      await transport.handleRequest(req, res, body);
+    } catch (e: any) {
+      console.error("[rift-mcp] request error:", e);
+      if (!res.headersSent) {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: e?.message || "internal" }));
+      } else {
+        res.end();
+      }
+    }
+  });
+
+  httpServer.listen(port, () => {
+    console.error(
+      `[rift-mcp] HTTP transport listening on :${port} (auth=${expectedBearer ? "bearer" : "off"})`
+    );
+  });
+}
+
+function pickTransport(): "stdio" | "http" {
+  const explicit = (process.env.MCP_TRANSPORT || "").trim().toLowerCase();
+  if (explicit === "http") return "http";
+  if (explicit === "stdio") return "stdio";
+  // No explicit choice — if PORT is set, assume we're in a PaaS like
+  // Caprover / Render / Fly and want HTTP. Otherwise stdio for the
+  // typical Claude Desktop subprocess case.
+  return process.env.PORT ? "http" : "stdio";
+}
+
+async function main() {
+  const mode = pickTransport();
+  if (mode === "http") {
+    await startHttp();
+  } else {
+    await startStdio();
+  }
+}
+
+main().catch((e) => {
+  console.error("[rift-mcp] fatal:", e);
+  process.exit(1);
+});
