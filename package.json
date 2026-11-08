@@ -1,7 +1,7 @@
 {
   "name": "@rift-finance/mcp-server",
-  "version": "2.0.0",
-  "description": "MCP server for Rift Finance SDK and API documentation - enables AI assistants to query endpoints, types, and usage examples. v2 adds HTTP transport for claude.ai connectors.",
+  "version": "3.0.0",
+  "description": "MCP server for Rift Finance SDK and API documentation - enables AI assistants to query endpoints, types, and usage examples. v2 adds HTTP transport for claude.ai connectors; v3 supports passkey-owned wallets (fund-moving tools return approval links).",
   "main": "dist/index.js",
   "bin": {
     "rift-mcp-server": "dist/index.js"

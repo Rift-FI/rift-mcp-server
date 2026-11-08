@@ -17,7 +17,7 @@ const client = new RiftApiClient(
 
 const server = new McpServer({
   name: "rift-finance",
-  version: "2.0.0",
+  version: "3.0.0",
 });
 
 // ── Helpers ──────────────────────────────────────────────
@@ -32,14 +32,19 @@ function err(e: any) {
 
   // Add recovery hints based on common errors
   let hint = "";
-  if (status === 429 || msg.includes("Too many failed verification attempts") || msg.includes("Too many requests")) hint = "\n\nNext step: rate limited or OTP locked out after too many wrong codes. Wait a few minutes before calling rift_send_otp again; do NOT keep retrying.";
-  else if (msg.includes("parent-proxy overloaded") || (status === 503 && !msg.includes("<"))) hint = "\n\nNext step: the signing service is overloaded. Wait a little before trying again. Do NOT automatically retry sends, payments, or withdrawals: first check history/status to make sure the original did not go through.";
-  else if (msg.includes("invalid credentials")) hint = "\n\nNext step: the wallet rejected the credentials for this signing request (wrong password, or an OTP/proof that is wrong or expired). For email/phone users call rift_send_otp for a fresh code; for externalId users ask for the password again.";
+  if (msg.includes("PASSKEY_SETUP_REQUIRED")) hint = "\n\nNext step: this user has no passkey yet, so nothing can be signed. Ask them to open the Rift app (https://app.riftfi.com) and complete \"Secure your wallet with a passkey\" (Settings → Security → Passkeys). Existing wallets keep the same address. Call rift_get_wallet_status to check; retry once needsPasskeySetup is false.";
+  else if (msg.includes("EOA_SIGNING_REMOVED")) hint = "\n\nNext step: raw transaction signing was removed (wallets are passkey-owned Safe smart accounts with no EOA key). Use rift_send_transaction (executes through the Safe, returns an approval link) instead.";
+  else if (msg.includes("PASSKEY_REQUIRED")) hint = "\n\nNext step: only a passkey can authorise this. Google / Apple are login only. Call the tool without a proof to get an approval link for the user.";
+  else if (msg.includes("REPLACED_BY_PASSKEY_WALLETS")) hint = "\n\nNext step: v3 migration was replaced by passkey wallets. The user registers a passkey in the Rift app; their address stays the same.";
+  else if (msg.includes("INVALID_PASSKEY_SIGNATURE")) hint = "\n\nNext step: the passkey signature didn't match the request (often an expired ticket). Ask the user to open the approval link again.";
+  else if (status === 429 || msg.includes("Too many failed verification attempts") || msg.includes("Too many requests")) hint = "\n\nNext step: rate limited or OTP locked out after too many wrong codes. Wait a few minutes before calling rift_send_otp again; do NOT keep retrying.";
+  else if (msg.includes("parent-proxy overloaded") || (status === 503 && !msg.includes("<"))) hint = "\n\nNext step: the service is overloaded. Wait a little before trying again. Do NOT automatically retry sends, payments, or withdrawals: first check history/status to make sure the original did not go through.";
+  else if (msg.includes("invalid credentials")) hint = "\n\nNext step: the credentials were rejected (wrong password or an OTP that is wrong or expired). For email/phone users call rift_send_otp for a fresh code; for externalId users ask for the password again.";
   else if (msg.includes("project owner") || msg.includes("Only the project owner")) hint = "\n\nNext step: this is a project-owner operation. Log in (rift_send_otp + rift_login) as the account that OWNS this project (the dashboard owner's email/phone), then retry.";
   else if (msg.includes("otpCode is required") || e?.requiresOTP) hint = "\n\nNext step: this server requires an OTP for email/phone sign-up. Call rift_send_otp for that email/phone, ask the user for the code, then call rift_signup again with otpCode.";
   else if (msg.includes("No API key")) hint = "\n\nNext step: ask the user for their Rift API key and call rift_set_api_key.";
   else if (msg.includes("Unauthorized") || msg.includes("Bearer token")) hint = "\n\nNext step: user needs to login first. Call rift_send_otp then rift_login.";
-  else if (msg.includes("OTP") || msg.includes("Password is required")) hint = "\n\nNext step: this operation requires OTP or password verification. For email/phone users, call rift_send_otp first, then retry with the otpCode. For externalId users, ask for their password.";
+  else if (msg.includes("OTP") || msg.includes("Password is required")) hint = "\n\nNext step: this operation requires OTP or password verification. For email/phone users, call rift_send_otp first, then retry with the otpCode. For externalId users, ask for their password. (Fund-moving operations don't need an OTP any more: they are approved with the user's passkey via an approval link.)";
   else if (msg.includes("KYC") || msg.includes("kyc")) hint = "\n\nNext step: user needs KYC verification. Call rift_kyc_get_token to start KYC flow.";
   else if (msg.includes("Merchant") || msg.includes("merchant") || msg.includes("KYB")) hint = "\n\nNext step: user's account needs merchant approval (KYB verification). This is done by the project admin.";
   else if (msg.includes("Insufficient") || msg.includes("balance")) hint = "\n\nNext step: user doesn't have enough funds. Call rift_get_balance to check their current balance.";
@@ -52,6 +57,37 @@ function err(e: any) {
 function json(data: any, prefix?: string) {
   const text = prefix ? `${prefix}\n${JSON.stringify(data, null, 2)}` : JSON.stringify(data, null, 2);
   return ok(text);
+}
+
+// Passkey-owned wallets: nobody but the user's passkey can move funds, so a
+// fund-moving call from an agent comes back as HTTP 202
+// { status: "APPROVAL_REQUIRED", approvalId, approvalUrl, expiresAt, summary }.
+// Nothing has happened on-chain yet. The agent must give approvalUrl to the
+// user and must NOT call the tool again to "retry".
+function isApproval(data: any): boolean {
+  return !!data && typeof data === "object" && data.status === "APPROVAL_REQUIRED" && typeof data.approvalId === "string";
+}
+
+function approvalText(data: any): string {
+  return [
+    "APPROVAL REQUIRED. Nothing has been sent or signed yet.",
+    "",
+    `Give the user this link and ask them to open it and approve with their passkey (Face ID / Touch ID / Windows Hello / security key):`,
+    `${data.approvalUrl}`,
+    "",
+    `Expires: ${data.expiresAt}. Approval ID: ${data.approvalId}.`,
+    "Show the user the summary below so they know what they are approving. Do NOT call this tool again to retry: that creates a second request.",
+    "After the user says they approved (or to check), call rift_get_approval with this approvalId.",
+    "",
+    "Summary:",
+    JSON.stringify(data.summary ?? {}, null, 2),
+  ].join("\n");
+}
+
+// Result of a fund-moving call: approval instructions on 202, otherwise
+// the usual JSON with `prefix`.
+function fundResult(data: any, prefix: string) {
+  return isApproval(data) ? ok(approvalText(data)) : json(data, prefix);
 }
 
 // User-management tools are authorised by the logged-in PROJECT OWNER's
@@ -76,7 +112,7 @@ function requireAuth(): string | null {
 
 server.tool(
   "rift_guide",
-  "START HERE. Get step-by-step instructions for any Rift operation. Call this FIRST when a user asks to do something and you're not sure of the exact flow. Covers: send crypto, withdraw to M-Pesa, buy crypto, bridge, check balance, login, KYC, invoices, WalletConnect, auto-swap, and more.",
+  "START HERE. Get step-by-step instructions for any Rift operation. Call this FIRST when a user asks to do something and you're not sure of the exact flow. Covers: send crypto, withdraw to M-Pesa, buy crypto, bridge, check balance, login, passkey setup and recovery, approvals, KYC, invoices, WalletConnect, auto-swap, and more.",
   { task: z.string().describe("What the user wants to do, e.g. 'send USDC', 'withdraw to M-Pesa', 'check balance', 'bridge tokens', 'create invoice', 'sign up'") },
   async ({ task }) => {
     const t = task.toLowerCase();
@@ -89,7 +125,8 @@ server.tool(
    - **External ID + password**: rift_login (no OTP step)
    - **Google**: client gets a Google ID token → rift_login_google
    - **Apple**: client gets an Apple identity token → rift_login_apple
-3. Done — all authenticated tools now work
+3. Call rift_get_wallet_status. If needsPasskeySetup is true, walk the user through passkey setup (rift_guide "passkey") before any fund-moving tool
+4. Done — all authenticated tools now work. Fund-moving tools return an approval link for the user
 
 If user doesn't have an API key, they need to create a project first.`,
 
@@ -117,16 +154,15 @@ The agent cannot generate the idToken itself — it must be provided by the user
 The agent cannot generate the idToken itself.`,
 
       send: `## Send Crypto Flow
-Prerequisites: user must be logged in (rift_login)
+Prerequisites: user must be logged in (rift_login) and have a passkey (rift_get_wallet_status → needsPasskeySetup false; otherwise see the passkey flow)
 
 1. Call rift_get_balance to check user has enough funds
 2. Confirm with user: recipient address, amount, token, chain
-3. Call rift_send_otp to send a fresh OTP for transaction auth
-4. Ask user for the OTP code
-5. Call rift_send_crypto with:
-   - to, value, token, chain, type: "gasless"
-   - email + otpCode (for email users) OR externalId + password (for password users)
-6. Return the transaction hash to the user
+3. Call rift_send_crypto with to, value, token, chain, type: "gasless"
+4. The result is an APPROVAL REQUIRED message with a link. Give the link to the user: they open it and approve with their passkey
+5. When they say they approved, call rift_get_approval with the approvalId and give them the transactionHash from result
+
+How approval works (passkey wallets): Rift wallets are owned only by the user's passkeys. You (the agent) cannot move funds. The tool returns an APPROVAL REQUIRED message with a link (https://app.riftfi.com/approve/...). Give the link to the user, show the summary, and wait. Check the outcome with rift_get_approval. Never call the tool again to retry. No OTP or password is needed for this.
 
 Common tokens: USDC, USDT. Common chains: BASE, POLYGON, ARBITRUM.
 Gasless = no gas fees for the user.`,
@@ -149,10 +185,11 @@ Prerequisites: user must be logged in, merchant-approved, KYC verified (for >$20
    BRL PIX: {"bankCode":"PIXKBRPC","accountIdentifier":"pix_key","accountName":"Name","institution":"pix"}
 
 5. Confirm everything with user (amount, fee, what they'll receive in fiat)
-6. Call rift_send_otp to send OTP for transaction auth
-7. Ask user for OTP code
-8. Call rift_offramp with: token, amount (or localAmount for exact fiat payout), currency, chain, recipient (JSON string), otpCode
-9. Return transaction code, poll with rift_poll_offramp_status
+6. Call rift_offramp with: token, amount (or localAmount for exact fiat payout), currency, chain, recipient (JSON string)
+7. The result is an APPROVAL REQUIRED link. Give it to the user to approve with their passkey
+8. After approval, call rift_get_approval; then track the payout with rift_poll_offramp_status / rift_get_offramp_orders
+
+How approval works (passkey wallets): Rift wallets are owned only by the user's passkeys. You (the agent) cannot move funds. The tool returns an APPROVAL REQUIRED message with a link (https://app.riftfi.com/approve/...). Give the link to the user, show the summary, and wait. Check the outcome with rift_get_approval. Never call the tool again to retry. No OTP or password is needed for this.
 
 Providers: KES uses Pretium (supports M-Pesa/Paybill/BuyGoods). NGN/UGX/GHS/ETB/CDF/TZS/MWK/BRL use Paycrest.
 Supported chains: BASE, ARBITRUM, POLYGON, ETHEREUM, CELO. Tokens: USDC, USDT.
@@ -179,15 +216,17 @@ Prerequisites: user must be logged in
 2. Call rift_bridge_quote to get fee and output amount — show to user
 3. Confirm with user
 4. Call rift_bridge_execute with sourceChain, destinationChain, token, amount
-5. Return transaction hash — tokens arrive in 1-5 minutes
+5. Give the user the approval link it returns; after they approve, rift_get_approval shows the transaction hash. Tokens arrive 1-5 minutes after approval
 
-No OTP required for bridge.
+How approval works (passkey wallets): Rift wallets are owned only by the user's passkeys. You (the agent) cannot move funds. The tool returns an APPROVAL REQUIRED message with a link (https://app.riftfi.com/approve/...). Give the link to the user, show the summary, and wait. Check the outcome with rift_get_approval. Never call the tool again to retry. No OTP or password is needed for this.
 Supported tokens: USDC, USDT.
 
 For SAME-CHAIN token-for-token swaps (e.g. USDC → WETH on Base), use rift_swap instead — bridge is for cross-chain only.`,
 
       swap: `## Token Swap Flow (Same-Chain)
 Prerequisites: user must be logged in
+
+NOTE: the backend swap endpoint is deprecated and may be unavailable. If rift_swap fails, tell the user to swap in the Rift app. When it works, it returns an approval link like every other fund-moving tool.
 
 For cross-chain token movement, use the bridge flow instead.
 
@@ -199,9 +238,9 @@ For cross-chain token movement, use the bridge flow instead.
    - value (amount of token_to_sell in human units, e.g. "10" for 10 USDC)
    - token_to_sell_address / token_to_buy_address ONLY for arbitrary ERC-20s not in the SDK list
    - isEth / isBuyingEth for native ETH legs
-3. Return the result
+3. Give the user the approval link; check with rift_get_approval
 
-No OTP required for swap.`,
+How approval works (passkey wallets): Rift wallets are owned only by the user's passkeys. You (the agent) cannot move funds. The tool returns an APPROVAL REQUIRED message with a link (https://app.riftfi.com/approve/...). Give the link to the user, show the summary, and wait. Check the outcome with rift_get_approval. Never call the tool again to retry. No OTP or password is needed for this.`,
 
       balance: `## Check Balance Flow
 Prerequisites: user must be logged in
@@ -236,8 +275,10 @@ Prerequisites: user must be logged in
 2. Call rift_wc_pair with uri and chain
 3. When DApp sends a request, call rift_wc_get_requests to see pending ones
 4. Show request details to user and ask to approve or reject
-5. Call rift_wc_approve or rift_wc_reject with the request ID
-6. To disconnect: call rift_wc_disconnect with the session topic`,
+5. Call rift_wc_reject to reject. Call rift_wc_approve to approve: it returns an approval link; the user signs with their passkey there, then the DApp gets its answer
+6. To disconnect: call rift_wc_disconnect with the session topic
+
+How approval works (passkey wallets): Rift wallets are owned only by the user's passkeys. You (the agent) cannot move funds. The tool returns an APPROVAL REQUIRED message with a link (https://app.riftfi.com/approve/...). Give the link to the user, show the summary, and wait. Check the outcome with rift_get_approval. Never call the tool again to retry. No OTP or password is needed for this.`,
 
       autoswap: `## Auto-Swap Configuration
 Prerequisites: user must be logged in
@@ -270,7 +311,41 @@ externalId + password account (no OTP):
 
 Account created: smart wallets are deployed on all chains.`,
 
+      passkey: `## Passkey Setup (required before anything can be signed)
+Rift wallets are Safe smart accounts owned ONLY by the user's passkeys. Neither Rift nor this agent holds a key that can move funds. Google / Apple sign-in is login only.
+
+1. Call rift_get_wallet_status
+   - needsPasskeySetup: true → the user must create a passkey before any send / offramp / bridge / signing works (those return PASSKEY_SETUP_REQUIRED until then)
+   - mode "legacy" → existing wallet: SAME wallet, SAME address, now protected by the passkey
+   - mode "none" → new user: the passkey creates their wallet
+2. Passkeys are created on the user's device, not by the agent. Tell the user to open the Rift app (https://app.riftfi.com) → "Secure your wallet with a passkey" (or Settings → Security → Passkeys) and follow the prompt (Face ID / Touch ID / Windows Hello / security key)
+3. Call rift_get_wallet_status again to confirm (passkeyCount ≥ 1, needsPasskeySetup false)
+4. Recommend adding a second passkey right away (see the passkey recovery flow)
+
+Developers: the SDK does this with rift.passkeys.setup() (browser); the API is POST /api/v1/passkeys/options then POST /api/v1/passkeys.`,
+
+      passkeyrecovery: `## Passkey Recovery: multiple passkeys
+A wallet can have several passkeys; ANY active one can approve. Losing the only passkey means losing access, so:
+
+1. Call rift_get_wallet_status and check passkeyCount. If it is 1, warn the user
+2. Ask them to add another passkey in the Rift app: Settings → Security → Passkeys → Add (another phone or laptop, a hardware security key, or a cross-device QR code). An EXISTING passkey must confirm the addition, because it changes the wallet's owners on-chain on every chain where the wallet is deployed
+3. Synced passkeys (iCloud Keychain, Google Password Manager) come back automatically on a new device signed into the same account. A security key or a second platform's passkey covers losing that account
+4. Removing a passkey (lost device) is done in the same screen and is confirmed with a remaining passkey. The last passkey can never be removed (LAST_PASSKEY)
+5. Note: deploying the wallet on a chain it has never been used on needs the FIRST passkey (it is fixed in the deployment code). Synced passkeys make this a non-issue
+
+Lost every passkey: contact Rift support; the agent cannot recover or move funds.`,
+
+      approvals: `## Approvals (how fund-moving tools work now)
+Tools that move funds or sign (rift_send_crypto, rift_offramp, rift_offramp_create_order, rift_bridge_execute, rift_swap, rift_wc_approve, rift_send_transaction, rift_sign_message) return an APPROVAL REQUIRED message instead of executing:
+- approvalUrl: give it to the user. They open it, check the summary and approve (or reject) with their passkey
+- expiresAt: 30 minutes. After that, start over with a new call
+- approvalId: call rift_get_approval to see status (pending / approved / rejected / expired / failed) and the result (transactionHash, userOpHash)
+- rift_list_approvals lists the user's approvals (default: pending)
+
+Rules: never call the original tool again to "retry" a pending approval (it creates a duplicate request); never ask the user for an OTP or password for these; you cannot approve on the user's behalf.`,
+
       recovery: `## Account Recovery Flow
+(Login / password recovery. To protect the WALLET with several devices, see the passkey recovery flow: rift_guide "passkey recovery".)
 1. Call rift_get_recovery_options with the user's externalId
 2. Shows available recovery methods (masked email/phone)
 3. Call rift_request_password_reset with externalId and method ("emailRecovery" or "phoneRecovery")
@@ -278,15 +353,17 @@ Account created: smart wallets are deployed on all chains.`,
 5. Call rift_reset_password with username, newPassword, email/phoneNumber, otpCode`,
 
       signer: `## Sign / Send Low-Level Transactions Flow
-Prerequisites: user must be logged in
+Prerequisites: user must be logged in and have a passkey
 
 1. Call rift_get_wallet_instance with chain to get wallet info
-2. Call rift_sign_transaction to sign a raw tx without broadcasting
-3. Call rift_send_transaction to EXECUTE a call via the user's smart wallet as an ERC-4337 UserOperation
-4. Call rift_sign_message for arbitrary message signing (DApp auth, etc.)
+2. Call rift_send_transaction to EXECUTE a call via the user's Safe smart wallet as an ERC-4337 UserOperation → returns an approval link for the user
+3. Call rift_sign_message for message signing (DApp auth, etc.) → returns an approval link; the signature (ERC-1271, by the Safe) is in rift_get_approval's result once approved
+4. rift_sign_transaction (raw EOA signing) was REMOVED: wallets have no EOA key any more (410 EOA_SIGNING_REMOVED)
+
+How approval works (passkey wallets): Rift wallets are owned only by the user's passkeys. You (the agent) cannot move funds. The tool returns an APPROVAL REQUIRED message with a link (https://app.riftfi.com/approve/...). Give the link to the user, show the summary, and wait. Check the outcome with rift_get_approval. Never call the tool again to retry. No OTP or password is needed for this.
 
 IMPORTANT about rift_send_transaction:
-- Sender on-chain is the user's SMART WALLET (not EOA). Response 'from' = smart wallet.
+- Sender on-chain is the user's SMART WALLET (Safe). Response 'from' = smart wallet.
 - Returned 'hash' is a userOperationHash — NOT a classic tx hash. Never link it as etherscan.io/tx/<hash>. Use jiffyscan.xyz/userOpHash/<hash> or a bundler RPC instead.
 - Gas is sponsored by default; pass paymasterToken (ERC-20 address) to pay gas in a token.
 - Use rift_send_crypto for simple token transfers instead — it's higher-level and user-friendly.`,
@@ -372,52 +449,47 @@ in the Rift dashboard. Add every origin that embeds the widget
 
       signtx: `## Signing transactions for widget-authenticated users
 
-Rift wallets sign server-side under the user's authenticated session,
-so a user who signed in via the widget can move funds with one HTTP
-call. The widget gives you a bearer token; you pass it to
-\`POST /transactions/send\` along with the action you want.
+Rift wallets are owned by the user's PASSKEYS. A widget access token lets you
+read and REQUEST, but every fund move needs the user's passkey. Two ways:
 
-### Example
+### 1. Approval request (server-side, simplest)
 
 \`\`\`js
-Rift.on("signin-success", async (user) => {
-  const res = await fetch(
-    "https://developers.riftfi.xyz/transactions/send",
-    {
-      method: "POST",
-      headers: {
-        "X-API-Key": "sk_YOUR_PROJECT_API_KEY",
-        "Authorization": \`Bearer \${user.accessToken}\`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        to: "0xRecipient...",
-        value: "10",
-        token: "USDC",
-        chain: "polygon",
-      }),
-    }
-  );
-  console.log(await res.json());  // { hash: "0x..." }
+const res = await fetch("https://developers.riftfi.xyz/transactions/send", {
+  method: "POST",
+  headers: {
+    "X-API-Key": "sk_YOUR_PROJECT_API_KEY",
+    "Authorization": \`Bearer \${user.accessToken}\`,
+    "Content-Type": "application/json",
+  },
+  body: JSON.stringify({ to: "0xRecipient...", value: "10", token: "USDC", chain: "polygon" }),
 });
+// HTTP 202:
+// { status: "APPROVAL_REQUIRED", approvalId, approvalUrl, expiresAt, summary }
+// Send the user to approvalUrl (or embed <RiftApprove approvalId />), then poll
+// GET /approvals/:approvalId for { status, result: { transactionHash } }.
 \`\`\`
 
-### Transaction OTP is mandatory
+### 2. Two-phase in the browser (@rift-finance/wallet v4)
 
-Every spend is gated by a fresh OTP (or password for externalId
-users). The flow:
-1. Call \`POST /otp/send\` to send a code to the user's email/phone.
-2. Forward the code to \`/transaction/spend\` in the \`otpCode\` field.
+\`\`\`js
+import { createPasskeyAuthProof, getHashToSign } from "@rift-finance/wallet";
+const p = await rift.transactions.previewSpend({ token: "USDC", chain: "POLYGON", recipient, amount: "10" });
+const authProof = await createPasskeyAuthProof(getHashToSign(p), { rpId: "yourdomain.com", allowCredentials: p.allowCredentials });
+await rift.signer.submitPreparedUserOp({ ticketId: p.ticketId, authProof });
+\`\`\`
 
-### Beyond send
-The same widget-issued accessToken authenticates every Rift endpoint:
-/wallet/*, /offramp/*, /onramp/*, /bridge/*, /swap/*, /walletconnect/*.
-See rift_get_api_endpoints for the full surface.`,
+No OTP or password is needed: the passkey is the consent. Google / Apple
+sign-in is login only. If the user has no passkey yet, signing routes return
+409 PASSKEY_SETUP_REQUIRED: send them through passkey setup first.`,
     };
 
     // Match the task to a flow. Order matters — more specific keywords first.
     let matched: string | undefined;
-    if (t.includes("widget") || t.includes("embed") || t.includes("client-side") || t.includes("client side") || t.includes("frontend") || t.includes("react sdk") || t.includes("npm package") || (t.includes("rift") && (t.includes("integrate") || t.includes("install")))) matched = flows.widget;
+    if ((t.includes("passkey") || t.includes("device") || t.includes("security key")) && (t.includes("recover") || t.includes("lost") || t.includes("another") || t.includes("second") || t.includes("multiple") || t.includes("add") || t.includes("remove"))) matched = flows.passkeyrecovery;
+    else if (t.includes("passkey") || t.includes("secure my wallet") || t.includes("secure wallet") || t.includes("wallet status") || t.includes("setup required") || t.includes("passkey_setup")) matched = flows.passkey;
+    else if (t.includes("approval") || t.includes("approve link") || t.includes("approval_required") || t.includes("pending approval")) matched = flows.approvals;
+    else if (t.includes("widget") || t.includes("embed") || t.includes("client-side") || t.includes("client side") || t.includes("frontend") || t.includes("react sdk") || t.includes("npm package") || (t.includes("rift") && (t.includes("integrate") || t.includes("install")))) matched = flows.widget;
     else if (t.includes("sign tx") || t.includes("sign transaction") || t.includes("widget user") || (t.includes("sign") && t.includes("widget")) || (t.includes("send") && t.includes("widget"))) matched = flows.signtx;
     else if (t.includes("google")) matched = flows.google;
     else if (t.includes("apple")) matched = flows.apple;
@@ -458,9 +530,13 @@ I can help with any of these. Tell me what you need:
 - **Auto-swap** — automatically bridge incoming tokens to preferred chain
 - **Sign up / Login** — create account or authenticate (email/phone OTP, externalId+password, Google, or Apple)
 - **Account recovery** — reset password via recovery methods
-- **Sign transactions** — sign or send raw blockchain transactions
+- **Sign / send transactions** — UserOperations and messages through the user's Safe (approval link)
+- **Passkeys** — passkey setup (required to sign), multiple passkeys for recovery
+- **Approvals** — how fund-moving tools return an approval link for the user
 - **User management** — suspend/unsuspend users (admin)
 - **Embed the widget** — add Rift sign-in to a website / React app (vanilla embed.js or @rift-finance/react)
+
+Fund-moving tools never execute directly: they return an approval link the user approves with their passkey (rift_guide "approvals").
 
 Current status:
 - API Key: ${client.hasApiKey() ? "set" : "NOT SET — need to call rift_set_api_key"}
@@ -1144,23 +1220,18 @@ server.tool(
 
 server.tool(
   "rift_send_crypto",
-  "Send crypto to an address. REAL TRANSACTION — always confirm with user first. Requires OTP or password: for email/phone users, call rift_send_otp FIRST to get a fresh OTP. For externalId users, ask for password. Requires login.",
+  "Send crypto to an address. REAL TRANSACTION — always confirm with user first. Does NOT execute directly: returns an APPROVAL REQUIRED link the user must open and approve with their passkey. Give the link to the user, then check with rift_get_approval. Never call again to retry. No OTP/password needed. Requires login.",
   {
     to: z.string().describe("Recipient wallet address (0x...)"),
     value: z.string().describe("Amount to send (e.g. '10' for 10 USDC)"),
     token: z.string().describe("Token: USDC, USDT, ETH, etc"),
     chain: z.string().describe("Chain: BASE, POLYGON, ARBITRUM, etc"),
     type: z.enum(["gasless", "normal"]).default("gasless").describe("gasless = no gas fee for user (recommended)"),
-    email: z.string().optional().describe("Sender's email — for email-signup users (with otpCode)"),
-    phoneNumber: z.string().optional().describe("Sender's phone — for phone-signup users (with otpCode)"),
-    externalId: z.string().optional().describe("Sender's external ID — for externalId-signup users (with password)"),
-    otpCode: z.string().optional().describe("Fresh OTP code from rift_send_otp — required for email/phone users"),
-    password: z.string().optional().describe("Password — required for externalId users"),
   },
   async (args) => {
     const authErr = requireAuth();
     if (authErr) return ok(authErr);
-    try { return json(await client.request("POST", "/api/v1/transaction/send", { body: args }), "Transaction sent!"); }
+    try { return fundResult(await client.request("POST", "/api/v1/transaction/send", { body: args }), "Transaction sent!"); }
     catch (e: any) { return err(e); }
   }
 );
@@ -1246,9 +1317,11 @@ server.tool(
 
 server.tool(
   "rift_offramp",
-  `Withdraw crypto to fiat. REAL PAYMENT — confirm with user. Requires: login + merchant approval + KYC (>$20) + OTP/password.
+  `Withdraw crypto to fiat. REAL PAYMENT — confirm with user. Requires: login + merchant approval + KYC (>$20) + a passkey.
 
-WARNING: This call can take 30-60+ seconds (on-chain tx + fiat settlement). A timeout does NOT mean failure — always check rift_poll_offramp_status with the transactionCode to confirm the actual status.
+Does NOT execute directly: returns an APPROVAL REQUIRED link. Give it to the user to approve with their passkey; check with rift_get_approval, then track the payout with rift_poll_offramp_status. Never call again to retry. No OTP/password needed.
+
+WARNING: after approval, settlement can take 30-60+ seconds (on-chain tx + fiat settlement). A timeout does NOT mean failure — always check rift_poll_offramp_status with the transactionCode to confirm the actual status.
 
 The 'recipient' field is a JSON string whose structure depends on the currency:
 
@@ -1272,8 +1345,6 @@ Use amount (USDC) or localAmount (exact fiat payout). Use rift_preview_exchange_
     currency: z.string().describe("REQUIRED. Fiat currency: KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL"),
     chain: z.string().describe("REQUIRED. Source chain: BASE, ARBITRUM, POLYGON, ETHEREUM, CELO"),
     recipient: z.string().describe("REQUIRED. JSON string — structure depends on currency. See tool description for formats. Call rift_get_payment_methods to find valid bankCode/institution values"),
-    otpCode: z.string().optional().describe("Fresh OTP — call rift_send_otp first. Required for email/phone users"),
-    password: z.string().optional().describe("Password — required for externalId users"),
   },
   async (args) => {
     const authErr = requireAuth();
@@ -1287,17 +1358,15 @@ Use amount (USDC) or localAmount (exact fiat payout). Use rift_preview_exchange_
       };
       if (args.amount) body.amount = args.amount;
       if (args.localAmount) body.localAmount = args.localAmount;
-      if (args.otpCode) body.otpCode = args.otpCode;
-      if (args.password) body.password = args.password;
       if (!args.amount && !args.localAmount) return ok("Error: provide either 'amount' (USDC) or 'localAmount' (fiat to receive). Use rift_preview_exchange_rate to check rates.");
-      return json(await client.request("POST", "/api/v1/offramp/pay", { body }), "Offramp submitted! Use rift_poll_offramp_status to track the order.");
+      return fundResult(await client.request("POST", "/api/v1/offramp/pay", { body }), "Offramp submitted! Use rift_poll_offramp_status to track the order.");
     } catch (e: any) { return err(e); }
   }
 );
 
 server.tool(
   "rift_offramp_create_order",
-  "DO NOT USE — use rift_offramp instead. This is a legacy endpoint that does the same thing. REAL PAYMENT — confirm with user.",
+  "DO NOT USE — use rift_offramp instead. This is a legacy endpoint that does the same thing. REAL PAYMENT — confirm with user. Returns an APPROVAL REQUIRED link for the user (passkey); never call again to retry.",
   {
     token: z.string().describe("REQUIRED. USDC or USDT"),
     amount: z.number().optional().describe("Amount in USDC. Provide this OR localAmount"),
@@ -1305,13 +1374,11 @@ server.tool(
     currency: z.string().describe("REQUIRED. KES, NGN, UGX, GHS, ETB, CDF, TZS, MWK, BRL"),
     chain: z.string().describe("REQUIRED. BASE, ARBITRUM, POLYGON, ETHEREUM, CELO"),
     recipient: z.string().describe("JSON string — same format as rift_offramp. See rift_offramp description for per-currency structure"),
-    otpCode: z.string().optional().describe("OTP code — required for email/phone users"),
-    password: z.string().optional().describe("Password — required for externalId users"),
   },
   async (args) => {
     const authErr = requireAuth();
     if (authErr) return ok(authErr);
-    try { return json(await client.request("POST", "/api/v1/offramp/", { body: args }), "Offramp order created!"); }
+    try { return fundResult(await client.request("POST", "/api/v1/offramp/", { body: args }), "Offramp order created!"); }
     catch (e: any) { return err(e); }
   }
 );
@@ -1453,7 +1520,7 @@ server.tool(
 
 server.tool(
   "rift_bridge_execute",
-  "Execute cross-chain bridge. MOVES REAL FUNDS — confirm with user. Does NOT require OTP. Tokens arrive in 1-5 minutes. Call rift_bridge_quote first to show fees. Requires login.",
+  "Execute cross-chain bridge. MOVES REAL FUNDS — confirm with user. Does NOT execute directly: returns an APPROVAL REQUIRED link the user approves with their passkey (check with rift_get_approval; never call again to retry). Tokens arrive 1-5 minutes after approval. Call rift_bridge_quote first to show fees. Requires login.",
   {
     sourceChain: z.string().describe("Source chain"),
     destinationChain: z.string().describe("Destination chain"),
@@ -1464,7 +1531,7 @@ server.tool(
   async (args) => {
     const authErr = requireAuth();
     if (authErr) return ok(authErr);
-    try { return json(await client.request("POST", "/api/v1/bridge/execute", { body: args }), "Bridge executed! Tokens arrive in 1-5 minutes."); }
+    try { return fundResult(await client.request("POST", "/api/v1/bridge/execute", { body: args }), "Bridge executed! Tokens arrive in 1-5 minutes."); }
     catch (e: any) { return err(e); }
   }
 );
@@ -1475,7 +1542,9 @@ server.tool(
 
 server.tool(
   "rift_swap",
-  `Swap one token for another on a single chain via the user's smart wallet. SAME-CHAIN ONLY — for cross-chain use rift_bridge_execute. REAL TX — confirm with user. No OTP required.
+  `Swap one token for another on a single chain via the user's smart wallet. SAME-CHAIN ONLY — for cross-chain use rift_bridge_execute. REAL TX — confirm with user.
+
+DEPRECATED upstream: the backend swap endpoint may be unavailable; if it fails, tell the user to swap in the Rift app. When it works it returns an APPROVAL REQUIRED link for the user (passkey); check with rift_get_approval, never call again to retry.
 
 Use 'flow: gasless' (recommended) for sponsored gas via UserOperation; use 'normal' to pay gas yourself. For known tokens (USDC, USDT, WETH, etc.) the chain's defaults are used; pass token_to_sell_address / token_to_buy_address only for arbitrary ERC-20s. For native ETH legs set isEth (selling ETH) or isBuyingEth (buying ETH).
 
@@ -1497,7 +1566,7 @@ Requires login.`,
   async (args) => {
     const authErr = requireAuth();
     if (authErr) return ok(authErr);
-    try { return json(await client.request("POST", "/api/v1/defi/swap", { body: args }), "Swap submitted!"); }
+    try { return fundResult(await client.request("POST", "/api/v1/defi/swap", { body: args }), "Swap submitted!"); }
     catch (e: any) { return err(e); }
   }
 );
@@ -1616,12 +1685,12 @@ server.tool(
 
 server.tool(
   "rift_wc_approve",
-  "Approve a pending DApp request. Always show the request details to user first. Requires login.",
+  "Approve a pending DApp request. Always show the request details to user first. Returns an APPROVAL REQUIRED link: the user signs with their passkey there, then the DApp gets its answer. Check with rift_get_approval; never call again to retry. Requires login.",
   { id: z.string().describe("Request ID from rift_wc_get_requests") },
   async ({ id }) => {
     const authErr = requireAuth();
     if (authErr) return ok(authErr);
-    try { return json(await client.request("POST", `/api/v1/walletconnect/requests/${id}/approve`), "Request approved!"); }
+    try { return fundResult(await client.request("POST", `/api/v1/walletconnect/requests/${encodeURIComponent(id)}/approve`), "Request approved!"); }
     catch (e: any) { return err(e); }
   }
 );
@@ -1786,7 +1855,7 @@ server.tool(
 
 server.tool(
   "rift_sign_transaction",
-  "Sign a raw blockchain transaction WITHOUT broadcasting it (low-level). This is NOT for sending tokens — use rift_send_crypto for that. Returns signed tx data for manual submission. Requires login.",
+  "REMOVED: raw EOA transaction signing. Rift wallets are passkey-owned Safe smart accounts with no EOA key, so the server answers 410 EOA_SIGNING_REMOVED. Use rift_send_transaction (executes through the Safe, returns an approval link) instead. Kept only so old prompts get a clear error.",
   {
     chain: z.string().describe("Chain"),
     to: z.string().optional().describe("Contract/recipient address"),
@@ -1798,20 +1867,22 @@ server.tool(
     if (authErr) return ok(authErr);
     try {
       const { chain, ...txData } = args;
-      return json(await client.request("POST", "/api/v1/signer/sign-transaction", { body: { chain, transactionData: txData } }));
+      return fundResult(await client.request("POST", "/api/v1/signer/sign-transaction", { body: { chain, transactionData: txData } }), "Signed.");
     } catch (e: any) { return err(e); }
   }
 );
 
 server.tool(
   "rift_send_transaction",
-  `Execute a call through the user's SMART WALLET as an ERC-4337 UserOperation. For advanced use (contract calls, native transfers) — for simple token sends use rift_send_crypto instead. REAL TX — confirm with user.
+  `Execute a call through the user's SMART WALLET (Safe) as an ERC-4337 UserOperation. For advanced use (contract calls, native transfers) — for simple token sends use rift_send_crypto instead. REAL TX — confirm with user.
+
+Does NOT execute directly: returns an APPROVAL REQUIRED link the user approves with their passkey. Check with rift_get_approval (result has userOpHash / transactionHash). Never call again to retry.
 
 Semantics an AI MUST know:
-- The on-chain sender is the user's SMART WALLET, NOT their EOA. The response 'from' field is the smart wallet address.
+- The on-chain sender is the user's SMART WALLET (a passkey-owned Safe). There is no EOA.
 - The returned 'hash' is a UserOperation hash (NOT a classic Ethereum tx hash). Do NOT link it as etherscan.io/tx/<hash> — that will 404. To track, use a bundler-aware explorer (jiffyscan.xyz/userOpHash/<hash>) or poll a bundler via eth_getUserOperationByHash.
 - Gas is sponsored by default. Pass 'paymasterToken' (ERC-20 contract address) to pay gas in a token like USDC instead.
-- Response fields: { success, hash (userOp), userOperationHash, transactionHash? (only on Lisk), from (smart wallet), owner (EOA), chainId, gasUsed?, paymasterToken }. Fields 'nonce', 'gasPrice', 'blockNumber' are NOT returned — UserOps don't have them.
+- After approval, rift_get_approval's result carries userOpHash and transactionHash. Fields 'nonce', 'gasPrice', 'blockNumber' are NOT returned — UserOps don't have them.
 
 Requires login.`,
   {
@@ -1828,7 +1899,7 @@ Requires login.`,
       const { chain, paymasterToken, ...txData } = args;
       const body: any = { chain, transactionData: txData };
       if (paymasterToken) body.paymasterToken = paymasterToken;
-      return json(
+      return fundResult(
         await client.request("POST", "/api/v1/signer/send-transaction", { body }),
         "UserOperation submitted. Note: 'hash' is a userOperationHash, not a classic tx hash — do not link it as etherscan.io/tx/..."
       );
@@ -1838,7 +1909,7 @@ Requires login.`,
 
 server.tool(
   "rift_sign_message",
-  "Sign an arbitrary message with the user's private key. Used for DApp authentication, off-chain signatures, etc. Requires login.",
+  "Sign a message with the user's Safe smart wallet (ERC-1271 contract signature; ERC-6492-wrapped if the wallet isn't deployed on that chain yet). Used for DApp authentication, off-chain signatures, etc. Returns an APPROVAL REQUIRED link the user approves with their passkey; the signature is in rift_get_approval's result. Never call again to retry. Requires login.",
   {
     chain: z.string().describe("Chain to use for signing"),
     message: z.string().describe("Message to sign"),
@@ -1846,7 +1917,60 @@ server.tool(
   async (args) => {
     const authErr = requireAuth();
     if (authErr) return ok(authErr);
-    try { return json(await client.request("POST", "/api/v1/signer/sign-message", { body: args })); }
+    try { return fundResult(await client.request("POST", "/api/v1/signer/sign-message", { body: args }), "Signed."); }
+    catch (e: any) { return err(e); }
+  }
+);
+
+// ============================================
+// PASSKEY WALLETS & APPROVALS
+// ============================================
+
+server.tool(
+  "rift_get_wallet_status",
+  "Passkey wallet status: mode (none | legacy | passkey), walletAddress, passkeyCount, per-chain owner mode and needsPasskeySetup. If needsPasskeySetup is true the user must create a passkey in the Rift app before anything can be signed (see rift_guide 'passkey'). If passkeyCount is 1, suggest adding a second passkey for recovery. Requires login.",
+  {},
+  async () => {
+    const authErr = requireAuth();
+    if (authErr) return ok(authErr);
+    try {
+      const data: any = await client.request("GET", "/api/v1/wallet/status");
+      let note = "";
+      if (data?.needsPasskeySetup) note = "The user has no passkey yet: nothing can be signed. Ask them to open https://app.riftfi.com and complete \"Secure your wallet with a passkey\". Existing wallets keep the same address.";
+      else if (data?.passkeyCount === 1) note = "Only one passkey: suggest adding a second one (Rift app → Settings → Security → Passkeys) so losing a device doesn't lock the wallet.";
+      return json(data, note || undefined);
+    } catch (e: any) { return err(e); }
+  }
+);
+
+server.tool(
+  "rift_get_approval",
+  "Check an approval request returned by a fund-moving tool (send, offramp, bridge, swap, WalletConnect approve, send transaction, sign message). Status: pending (user hasn't approved yet — remind them of the link), approved (result has transactionHash / userOpHash / signature), rejected, expired (start over with a new call), failed. Works with the API key alone.",
+  { approvalId: z.string().describe("approvalId from the APPROVAL REQUIRED message") },
+  async ({ approvalId }) => {
+    if (!client.hasApiKey()) return ok("No API key set. Ask the user for their Rift API key (starts with sk_) and call rift_set_api_key first.");
+    try {
+      const data: any = await client.request("GET", `/api/v1/approvals/${encodeURIComponent(approvalId)}`);
+      const hints: Record<string, string> = {
+        pending: "Still waiting for the user. Remind them to open the approval link and approve with their passkey. Do NOT create a new request.",
+        approved: "Approved and executed. Share the result with the user.",
+        rejected: "The user rejected it. Nothing was sent.",
+        expired: "The request expired unapproved. Nothing was sent. If the user still wants it, call the original tool again to get a fresh link.",
+        failed: "Approved but execution failed. Nothing should be retried without checking balances / history first.",
+      };
+      return json(data, hints[data?.status] || undefined);
+    } catch (e: any) { return err(e); }
+  }
+);
+
+server.tool(
+  "rift_list_approvals",
+  "List the user's approval requests (default: pending). Use it to remind the user of links they haven't approved yet. Requires login.",
+  { status: z.enum(["pending", "approved", "rejected", "expired", "failed"]).default("pending").describe("Filter by status (default pending)") },
+  async ({ status }) => {
+    const authErr = requireAuth();
+    if (authErr) return ok(authErr);
+    try { return json(await client.request("GET", "/api/v1/approvals", { params: { status } })); }
     catch (e: any) { return err(e); }
   }
 );

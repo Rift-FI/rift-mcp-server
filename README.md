@@ -2,7 +2,9 @@
 
 MCP (Model Context Protocol) server that gives AI assistants full access to the Rift Finance platform. Users can send crypto, check balances, offramp to M-Pesa, bridge across chains, and more — just by chatting.
 
-**64 tools** covering every Rift API endpoint plus documentation search.
+**83 tools** covering every Rift API endpoint plus documentation search.
+
+> **Passkey-owned wallets (v3.0.0 of this server).** Every Rift wallet is a Safe smart account owned only by the user's passkeys. Neither Rift nor this MCP server can move funds. Fund-moving tools (`rift_send_crypto`, `rift_offramp`, `rift_offramp_create_order`, `rift_bridge_execute`, `rift_swap`, `rift_wc_approve`, `rift_send_transaction`, `rift_sign_message`) return an **approval link** (`https://app.riftfi.com/approve/<id>`). The agent gives it to the user, who approves with their passkey; `rift_get_approval` reports the outcome. No OTP or password is needed for these any more, and Google / Apple sign-in is login only. `rift_sign_transaction` (raw EOA signing) was removed upstream (`410 EOA_SIGNING_REMOVED`).
 
 ## Quick Setup
 
@@ -152,16 +154,29 @@ AI: [calls rift_login] → You're logged in!
 
 User: "Send 50 USDC to 0xABC... on Base"
 
-AI: You want to send 50 USDC to 0xABC... on Base (gasless).
-    I'll need an OTP to authorize. Check your email.
-    [calls rift_send_otp]
+AI: You want to send 50 USDC to 0xABC... on Base (gasless). Confirm?
 
-User: "Code is 193847"
+User: "Yes"
 
-AI: [calls rift_send_crypto] → Done! Tx hash: 0xdef...
+AI: [calls rift_send_crypto] → APPROVAL REQUIRED
+    Please open https://app.riftfi.com/approve/6f1c... and approve
+    with your passkey (Face ID / Touch ID). It expires in 30 minutes.
+
+User: "Done"
+
+AI: [calls rift_get_approval] → approved. Tx hash: 0xdef...
 ```
 
-## All 64 Tools
+If `rift_get_wallet_status` says `needsPasskeySetup: true`, the user must first create a passkey in the Rift app ("Secure your wallet with a passkey"); existing wallets keep their address. Recommend a second passkey (another device or a security key) for recovery. `rift_guide` covers this: tasks "passkey", "passkey recovery", "approvals".
+
+## All 83 Tools
+
+### Passkey Wallet & Approvals (3)
+| Tool | Description |
+|------|-------------|
+| `rift_get_wallet_status` | Wallet mode, passkey count, per-chain owner mode, `needsPasskeySetup` |
+| `rift_get_approval` | Status + result of an approval request (API key alone is enough) |
+| `rift_list_approvals` | The user's approval requests (default: pending) |
 
 ### Setup & Docs (6)
 | Tool | Description |
@@ -193,7 +208,7 @@ AI: [calls rift_send_crypto] → Done! Tx hash: 0xdef...
 | Tool | Description |
 |------|-------------|
 | `rift_get_balance` | Check balance (by chain/token) |
-| `rift_send_crypto` | Send crypto (gasless) |
+| `rift_send_crypto` | Send crypto (gasless). Returns an approval link |
 | `rift_get_transaction_history` | Transaction history |
 | `rift_get_transaction_fee` | Calculate fees |
 
@@ -202,7 +217,7 @@ AI: [calls rift_send_crypto] → Done! Tx hash: 0xdef...
 |------|-------------|
 | `rift_preview_exchange_rate` | Preview FX rate |
 | `rift_get_payment_methods` | Banks/mobile money by currency |
-| `rift_offramp` | Cash out to M-Pesa/bank |
+| `rift_offramp` | Cash out to M-Pesa/bank. Returns an approval link |
 | `rift_get_withdrawal_fee` | Get withdrawal fee |
 | `rift_poll_offramp_status` | Track offramp order |
 | `rift_get_offramp_orders` | List offramp orders |
@@ -219,7 +234,7 @@ AI: [calls rift_send_crypto] → Done! Tx hash: 0xdef...
 |------|-------------|
 | `rift_get_bridge_routes` | Available routes |
 | `rift_bridge_quote` | Get quote |
-| `rift_bridge_execute` | Execute bridge |
+| `rift_bridge_execute` | Execute bridge. Returns an approval link |
 
 ### KYC (6)
 | Tool | Description |
@@ -236,7 +251,7 @@ AI: [calls rift_send_crypto] → Done! Tx hash: 0xdef...
 |------|-------------|
 | `rift_wc_pair` | Pair with DApp |
 | `rift_wc_get_requests` | Pending requests |
-| `rift_wc_approve` | Approve request |
+| `rift_wc_approve` | Approve request. Returns an approval link |
 | `rift_wc_reject` | Reject request |
 | `rift_wc_sessions` | List sessions |
 | `rift_wc_disconnect` | Disconnect session |
@@ -255,13 +270,13 @@ AI: [calls rift_send_crypto] → Done! Tx hash: 0xdef...
 | `rift_notifications_send` | Send notification |
 | `rift_notifications_subscriptions` | Get/delete subscriptions |
 
-### Signer / Proxy Wallet (4)
+### Signer (4)
 | Tool | Description |
 |------|-------------|
 | `rift_get_wallet_instance` | Get wallet for chain |
-| `rift_sign_transaction` | Sign without broadcast |
-| `rift_send_transaction` | Sign + broadcast |
-| `rift_sign_message` | Sign message |
+| `rift_sign_transaction` | Removed upstream (410 `EOA_SIGNING_REMOVED`); kept for a clear error |
+| `rift_send_transaction` | UserOperation through the Safe. Returns an approval link |
+| `rift_sign_message` | ERC-1271 message signature by the Safe. Returns an approval link |
 
 ### Assets (3)
 | Tool | Description |
